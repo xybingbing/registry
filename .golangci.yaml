@@ -1,0 +1,141 @@
+version: "2"
+linters:
+  default: all
+  disable:
+    - contextcheck
+    - copyloopvar
+    - depguard
+    - exhaustive
+    - exhaustruct
+    - forbidigo
+    - funcorder
+    - funlen
+    - gocognit
+    - goconst
+    - gomodguard
+    - gosmopolitan
+    - iface
+    - inamedparam
+    - intrange
+    - ireturn
+    - maintidx
+    - mnd
+    - musttag
+    - noinlineerr
+    - paralleltest
+    - prealloc
+    - promlinter
+    - protogetter
+    - recvcheck
+    - revive
+    - rowserrcheck
+    - sqlclosecheck
+    - staticcheck
+    - usetesting
+    - wrapcheck
+    - wsl
+  settings:
+    cyclop:
+      max-complexity: 40
+    dupl:
+      threshold: 200
+    mnd:
+      checks:
+        - argument
+        - case
+        - condition
+        - operation
+        - return
+        - assign
+      ignored-numbers:
+        - "10"
+        - "64"
+    nestif:
+      min-complexity: 26
+    nolintlint:
+      allow-unused: true
+    varnamelen:
+      check-return: true
+      ignore-names:
+        - err
+        - ok
+        - gc
+        - wg
+      ignore-type-assert-ok: true
+      ignore-map-index-ok: true
+      ignore-chan-recv-ok: true
+      ignore-decls:
+        - n int
+        - i int
+        - r *os.File
+        - w *os.File
+        - to int64
+        - l *ldap.Conn
+        - w http.ResponseWriter
+        - r *http.Request
+    wsl_v5:
+      allow-first-in-block: true
+      allow-whole-block: false
+      branch-max-lines: 2
+      enable:
+        - err
+      disable:
+        - assign
+        - defer
+        - if
+        - send
+        - expr
+        - select
+        - switch
+  exclusions:
+    generated: lax
+    presets:
+      - comments
+      - common-false-positives
+      - legacy
+      - std-error-handling
+    rules:
+      - linters:
+          - godot
+        path: pkg/api/routes.go
+      - linters:
+          - godot
+        path: pkg/extensions/extension_image_trust.go
+      - linters:
+          - godot
+        path: pkg/extensions/extension_mgmt.go
+      - linters:
+          - lll
+          - varnamelen
+        path: pkg/extensions/search/schema.resolvers.go
+      - linters:
+          - dupl
+        path: _test\.go
+      - linters:
+          - cyclop
+        path: (.+)_test\.go
+    paths:
+      - internal
+      - third_party$
+      - builtin$
+      - examples$
+formatters:
+  enable:
+    - gci
+    - gofmt
+    - gofumpt
+    - goimports
+  settings:
+    gci:
+      sections:
+        - standard
+        - default
+        - prefix(zotregistry.dev/zot/v2)
+  exclusions:
+    generated: lax
+    paths:
+      - internal
+      - third_party$
+      - builtin$
+      - examples$
+      - pkg/extensions/search/schema.resolvers.go

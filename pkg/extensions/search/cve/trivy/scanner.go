@@ -1,0 +1,1054 @@
+package trivy
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"maps"
+	"os"
+	"path"
+	"strconv"
+	"strings"
+	"sync"
+
+	"github.com/aquasecurity/trivy-db/pkg/metadata"
+	dbTypes "github.com/aquasecurity/trivy-db/pkg/types"
+	"github.com/aquasecurity/trivy/pkg/commands/artifact"
+	"github.com/aquasecurity/trivy/pkg/commands/operation"
+	"github.com/aquasecurity/trivy/pkg/db"
+	fanalTypes "github.com/aquasecurity/trivy/pkg/fanal/types"
+	"github.com/aquasecurity/trivy/pkg/flag"
+	"github.com/aquasecurity/trivy/pkg/javadb"
+	"github.com/aquasecurity/trivy/pkg/types"
+	xos "github.com/aquasecurity/trivy/pkg/x/os"
+	xstrings "github.com/aquasecurity/trivy/pkg/x/strings"
+	"github.com/google/go-containerregistry/pkg/name"
+	regTypes "github.com/google/go-containerregistry/pkg/v1/types"
+	godigest "github.com/opencontainers/go-digest"
+	"github.com/opencontainers/image-spec/specs-go"
+	ispec "github.com/opencontainers/image-spec/specs-go/v1"
+	_ "modernc.org/sqlite"
+
+	zerr "zotregistry.dev/zot/v2/errors"
+	zcommon "zotregistry.dev/zot/v2/pkg/common"
+	"zotregistry.dev/zot/v2/pkg/compat"
+	extconf "zotregistry.dev/zot/v2/pkg/extensions/config"
+	cvecache "zotregistry.dev/zot/v2/pkg/extensions/search/cve/cache"
+	cvemodel "zotregistry.dev/zot/v2/pkg/extensions/search/cve/model"
+	"zotregistry.dev/zot/v2/pkg/log"
+	"zotregistry.dev/zot/v2/pkg/meta"
+	mTypes "zotregistry.dev/zot/v2/pkg/meta/types"
+	"zotregistry.dev/zot/v2/pkg/storage"
+	storageConstants "zotregistry.dev/zot/v2/pkg/storage/constants"
+)
+
+const cacheSize = 1000000
+
+const (
+	defaultSBOMFormat         = types.FormatSPDXJSON
+	defaultSBOMArtifactType   = "application/spdx+json"
+	defaultSBOMLayerMediaType = "application/spdx+json"
+	cycloneDXArtifactType     = "application/vnd.cyclonedx+json"
+	cycloneDXLayerMediaType   = "application/vnd.cyclonedx+json"
+)
+
+var errImageStoreNotFound = errors.New("image store not found")
+
+var newArtifactRunner = artifact.NewRunner //nolint:gochecknoglobals // test seam for deterministic runner injection
+
+// getNewScanOptions sets trivy configuration values for our scans and returns them as
+// a trivy Options structure.
+func getNewScanOptions(dir string, dbRepositoryRef, javaDBRepositoryRef name.Reference,
+	vulnSeveritySources []dbTypes.SourceID, sbomEnabled bool,
+) *flag.Options {
+	scanOptions := flag.Options{
+		GlobalOptions: flag.GlobalOptions{
+			CacheDir: dir,
+		},
+		ScanOptions: flag.ScanOptions{
+			Scanners:         types.Scanners{types.VulnerabilityScanner},
+			SkipVersionCheck: true,
+			DisableTelemetry: true,
+			OfflineScan:      true,
+		},
+		PackageOptions: flag.PackageOptions{
+			PkgRelationships: fanalTypes.Relationships,
+			PkgTypes:         []string{types.PkgTypeOS, types.PkgTypeLibrary},
+		},
+		DBOptions: flag.DBOptions{
+			DBRepositories:     []name.Reference{dbRepositoryRef},
+			JavaDBRepositories: []name.Reference{javaDBRepositoryRef},
+			SkipDBUpdate:       true,
+			SkipJavaDBUpdate:   true,
+		},
+		VulnerabilityOptions: flag.VulnerabilityOptions{
+			VulnSeveritySources: vulnSeveritySources,
+		},
+		ReportOptions: flag.ReportOptions{
+			Format: "table",
+			Severities: []dbTypes.Severity{
+				dbTypes.SeverityUnknown,
+				dbTypes.SeverityLow,
+				dbTypes.SeverityMedium,
+				dbTypes.SeverityHigh,
+				dbTypes.SeverityCritical,
+			},
+		},
+	}
+
+	if sbomEnabled {
+		scanOptions.ScanOptions.Scanners = types.Scanners{types.VulnerabilityScanner, types.LicenseScanner}
+		scanOptions.ScanOptions.DetectionPriority = fanalTypes.PriorityComprehensive
+		scanOptions.ImageOptions.ScanRemovedPkgs = true
+		scanOptions.LicenseOptions.LicenseFull = true
+		scanOptions.PackageOptions.IncludeDevDeps = true
+	}
+
+	return &scanOptions
+}
+
+type cveTrivyController struct {
+	DefaultCveConfig *flag.Options
+	SubCveConfig     map[string]*flag.Options
+}
+
+type Scanner struct {
+	metaDB              mTypes.MetaDB
+	cveController       cveTrivyController
+	storeController     storage.StoreController
+	log                 log.Logger
+	dbLock              *sync.Mutex
+	cache               *cvecache.CveCache
+	dbRepositoryRef     name.Reference
+	javaDBRepositoryRef name.Reference
+	vulnSeveritySources []dbTypes.SourceID
+	sbomOptions         sbomOptions
+}
+
+type sbomOptions struct {
+	enabled        bool
+	reportFormat   types.Format
+	artifactType   string
+	layerMediaType string
+}
+
+type generatedSBOM struct {
+	filePath string
+	digest   godigest.Digest
+	size     int64
+}
+
+func NewScanner(storeController storage.StoreController,
+	metaDB mTypes.MetaDB, cveConfig *extconf.CVEConfig, log log.Logger,
+) *Scanner {
+	var trivyCfg *extconf.TrivyConfig
+	if cveConfig != nil && cveConfig.Trivy != nil {
+		trivyCfg = cveConfig.Trivy
+	}
+
+	if trivyCfg == nil {
+		trivyCfg = &extconf.TrivyConfig{}
+	}
+
+	sbomOpts := getSBOMOptions(trivyCfg.SBOM, log)
+
+	dbRepository := trivyCfg.DBRepository
+	javaDBRepository := trivyCfg.JavaDBRepository
+	vulnSeveritySources := trivyCfg.VulnSeveritySources
+
+	// The logic to set defaults is similar to what trivy itself uses:
+	// https://github.com/aquasecurity/trivy/blob/v0.51.4/pkg/flag/db_flags.go#L152
+	var dbRepositoryRef name.Reference
+
+	dbRepositoryRef, err := name.ParseReference(dbRepository, name.WithDefaultTag(""))
+	if err != nil {
+		log.Fatal().Err(err).Str("dbRepository", dbRepository).Msg("invalid reference")
+	}
+
+	// Add the schema version if the tag is not specified for backward compatibility.
+	if t, ok := dbRepositoryRef.(name.Tag); ok && t.TagStr() == "" {
+		dbRepositoryRef = t.Tag(strconv.Itoa(db.SchemaVersion))
+	}
+
+	var javaDBRepositoryRef name.Reference
+	if javaDBRepository != "" {
+		javaDBRepositoryRef, err = name.ParseReference(javaDBRepository, name.WithDefaultTag(""))
+		if err != nil {
+			log.Fatal().Err(err).Str("javaDBRepository", javaDBRepository).Msg("invalid reference")
+		}
+
+		// Add the schema version if the tag is not specified for backward compatibility.
+		if t, ok := javaDBRepositoryRef.(name.Tag); ok && t.TagStr() == "" {
+			javaDBRepositoryRef = t.Tag(strconv.Itoa(javadb.SchemaVersion))
+		}
+	}
+
+	cveController := cveTrivyController{}
+
+	subCveConfig := make(map[string]*flag.Options)
+
+	sevSources := xstrings.ToTSlice[dbTypes.SourceID](vulnSeveritySources)
+	if len(sevSources) == 0 {
+		sevSources = []dbTypes.SourceID{"auto"}
+	}
+
+	if storeController.DefaultStore != nil {
+		imageStore := storeController.DefaultStore
+
+		rootDir := imageStore.RootDir()
+
+		cacheDir := path.Join(rootDir, "_trivy")
+		opts := getNewScanOptions(cacheDir, dbRepositoryRef, javaDBRepositoryRef, sevSources, sbomOpts.enabled)
+
+		cveController.DefaultCveConfig = opts
+	}
+
+	if storeController.SubStore != nil {
+		for route, storage := range storeController.SubStore {
+			rootDir := storage.RootDir()
+
+			cacheDir := path.Join(rootDir, "_trivy")
+			opts := getNewScanOptions(cacheDir, dbRepositoryRef, javaDBRepositoryRef, sevSources, sbomOpts.enabled)
+
+			subCveConfig[route] = opts
+		}
+	}
+
+	cveController.SubCveConfig = subCveConfig
+
+	return &Scanner{
+		log:                 log,
+		metaDB:              metaDB,
+		cveController:       cveController,
+		storeController:     storeController,
+		dbLock:              &sync.Mutex{},
+		cache:               cvecache.NewCveCache(cacheSize, log),
+		dbRepositoryRef:     dbRepositoryRef,
+		javaDBRepositoryRef: javaDBRepositoryRef,
+		vulnSeveritySources: sevSources,
+		sbomOptions:         sbomOpts,
+	}
+}
+
+func getSBOMOptions(cfg *extconf.SBOMConfig, logger log.Logger) sbomOptions {
+	options := sbomOptions{
+		enabled:        false,
+		reportFormat:   defaultSBOMFormat,
+		artifactType:   defaultSBOMArtifactType,
+		layerMediaType: defaultSBOMLayerMediaType,
+	}
+
+	if cfg == nil || !cfg.Enable {
+		return options
+	}
+
+	options.enabled = true
+
+	format := strings.ToLower(cfg.Format)
+	if format == "" || format == string(types.FormatSPDXJSON) {
+		return options
+	}
+
+	if format == string(types.FormatCycloneDX) {
+		options.reportFormat = types.FormatCycloneDX
+		options.artifactType = cycloneDXArtifactType
+		options.layerMediaType = cycloneDXLayerMediaType
+
+		return options
+	}
+
+	logger.Warn().Str("format", cfg.Format).
+		Msg("unsupported trivy sbom format, defaulting to spdx-json")
+
+	return options
+}
+
+func (scanner Scanner) getTrivyOptions(image string) flag.Options {
+	// Split image to get route prefix
+	prefixName := storage.GetRoutePrefix(image)
+
+	var opts flag.Options
+
+	var ok bool
+
+	var rootDir string
+
+	// Get corresponding CVE trivy config, if no sub cve config present that means its default
+	_, ok = scanner.cveController.SubCveConfig[prefixName]
+	if ok {
+		opts = *scanner.cveController.SubCveConfig[prefixName]
+
+		imgStore := scanner.storeController.SubStore[prefixName]
+
+		rootDir = imgStore.RootDir()
+	} else {
+		opts = *scanner.cveController.DefaultCveConfig
+
+		imgStore := scanner.storeController.DefaultStore
+
+		rootDir = imgStore.RootDir()
+	}
+
+	opts.ScanOptions.Target = path.Join(rootDir, image)
+	opts.ImageOptions.Input = path.Join(rootDir, image)
+
+	return opts
+}
+
+// withTempDir creates a temporary directory using xos.TempDir(), executes the provided function,
+// and then calls xos.Cleanup() to clean up Trivy's process-specific temp directory.
+func (scanner Scanner) withTempDir(wrappedFunc func() error) error {
+	// Ensure Trivy's process-specific temp directory is initialized,
+	// call TempDir() to get the path, then create it if it doesn't exist with MkdirAll.
+	tempDir := xos.TempDir()
+
+	if err := os.MkdirAll(tempDir, 0o755); err != nil {
+		scanner.log.Error().Err(err).Str("tempDir", tempDir).Msg("failed to create Trivy temp directory")
+
+		return err
+	}
+
+	defer func() {
+		// Clean up Trivy's process-specific temp directory (includes our tmpDir)
+		if err := xos.Cleanup(); err != nil {
+			scanner.log.Warn().Err(err).Str("tempDir", tempDir).Msg("failed to cleanup Trivy temp directory")
+		}
+	}()
+
+	return wrappedFunc()
+}
+
+func (scanner Scanner) runTrivy(ctx context.Context, opts flag.Options) (types.Report, *generatedSBOM, error) {
+	err := scanner.checkDBPresence()
+	if err != nil {
+		return types.Report{}, nil, err
+	}
+
+	report := types.Report{}
+
+	var sbom *generatedSBOM
+
+	err = scanner.withTempDir(func() error {
+		runner, err := newArtifactRunner(ctx, opts, artifact.TargetContainerImage)
+		if err != nil {
+			return err
+		}
+		defer runner.Close(ctx)
+
+		report, err = runner.ScanImage(ctx, opts)
+		if err != nil {
+			return err
+		}
+
+		report, err = runner.Filter(ctx, opts, report)
+		if err != nil {
+			return err
+		}
+
+		if scanner.sbomOptions.enabled {
+			var sbomErr error
+			sbom, sbomErr = scanner.generateSBOM(ctx, runner, opts, report)
+			if sbomErr != nil {
+				scanner.log.Warn().Err(sbomErr).Str("image", opts.ImageOptions.Input).Msg("failed to generate sbom")
+			}
+		}
+
+		return nil
+	})
+
+	return report, sbom, err
+}
+
+func (scanner Scanner) generateSBOM(ctx context.Context, runner artifact.Runner, opts flag.Options, report types.Report,
+) (*generatedSBOM, error) {
+	sbomTempFile, err := os.CreateTemp("", "zot-trivy-sbom-*.json")
+	if err != nil {
+		return nil, err
+	}
+
+	sbomPath := sbomTempFile.Name()
+
+	if err = sbomTempFile.Close(); err != nil {
+		_ = os.Remove(sbomPath)
+
+		return nil, err
+	}
+
+	sbomOpts := opts
+	sbomOpts.ReportOptions.Format = scanner.sbomOptions.reportFormat
+	sbomOpts.ReportOptions.Output = sbomTempFile.Name()
+	sbomOpts.ReportOptions.ListAllPkgs = true
+	sbomOpts.ReportOptions.DependencyTree = true
+
+	if err = runner.Report(ctx, sbomOpts, report); err != nil {
+		_ = os.Remove(sbomPath)
+
+		return nil, err
+	}
+
+	sbomDigest, sbomSize, err := digestAndSizeFromFile(sbomPath)
+	if err != nil {
+		_ = os.Remove(sbomPath)
+
+		return nil, err
+	}
+
+	return &generatedSBOM{filePath: sbomPath, digest: sbomDigest, size: sbomSize}, nil
+}
+
+func digestAndSizeFromFile(filePath string) (godigest.Digest, int64, error) {
+	file, err := os.Open(filePath)
+	if err != nil {
+		return "", 0, err
+	}
+	defer file.Close()
+
+	digester := godigest.Canonical.Digester()
+	size, err := io.Copy(digester.Hash(), file)
+	if err != nil {
+		return "", 0, err
+	}
+
+	return digester.Digest(), size, nil
+}
+
+func (scanner Scanner) IsImageFormatScannable(repo, ref string) (bool, error) {
+	var (
+		digestStr = ref
+		mediaType string
+	)
+
+	if zcommon.IsTag(ref) {
+		imgDescriptor, err := getImageDescriptor(context.Background(), scanner.metaDB, repo, ref)
+		if err != nil {
+			return false, err
+		}
+
+		digestStr = imgDescriptor.Digest
+		mediaType = imgDescriptor.MediaType
+	} else {
+		var found bool
+
+		found, mediaType = findMediaTypeForDigest(scanner.metaDB, godigest.Digest(ref))
+		if !found {
+			return false, zerr.ErrManifestNotFound
+		}
+	}
+
+	return scanner.IsImageMediaScannable(repo, digestStr, mediaType)
+}
+
+func (scanner Scanner) IsImageMediaScannable(repo, digestStr, mediaType string) (bool, error) {
+	image := repo + "@" + digestStr
+
+	if mediaType == ispec.MediaTypeImageManifest || //nolint:gocritic // not converting to switch-case
+		compat.IsCompatibleManifestMediaType(mediaType) {
+		ok, err := scanner.isManifestScanable(digestStr)
+		if err != nil {
+			return ok, fmt.Errorf("image '%s' %w", image, err)
+		}
+
+		return ok, nil
+	} else if mediaType == ispec.MediaTypeImageIndex ||
+		compat.IsCompatibleManifestListMediaType(mediaType) {
+		ok, err := scanner.isIndexScannable(digestStr)
+		if err != nil {
+			return ok, fmt.Errorf("image '%s' %w", image, err)
+		}
+
+		return ok, nil
+	} else {
+		return false, nil
+	}
+}
+
+func (scanner Scanner) isManifestScanable(digestStr string) (bool, error) {
+	if scanner.cache.Get(digestStr) != nil {
+		return true, nil
+	}
+
+	manifestData, err := scanner.metaDB.GetImageMeta(godigest.Digest(digestStr))
+	if err != nil {
+		return false, err
+	}
+
+	for _, imageLayer := range manifestData.Manifests[0].Manifest.Layers {
+		switch imageLayer.MediaType {
+		case ispec.MediaTypeImageLayerGzip, ispec.MediaTypeImageLayer, string(regTypes.DockerLayer):
+			continue
+		default:
+			return false, fmt.Errorf("%w: layer media type '%s'", zerr.ErrScanNotSupported, imageLayer.MediaType)
+		}
+	}
+
+	return true, nil
+}
+
+func (scanner Scanner) isManifestDataScannable(manifestData mTypes.ManifestMeta) (bool, error) {
+	if scanner.cache.Get(manifestData.Digest.String()) != nil {
+		return true, nil
+	}
+
+	for _, imageLayer := range manifestData.Manifest.Layers {
+		switch imageLayer.MediaType {
+		case ispec.MediaTypeImageLayerGzip, ispec.MediaTypeImageLayer, string(regTypes.DockerLayer):
+			continue
+		default:
+			return false, fmt.Errorf("%w: layer media type '%s'", zerr.ErrScanNotSupported, imageLayer.MediaType)
+		}
+	}
+
+	return true, nil
+}
+
+func (scanner Scanner) isIndexScannable(digestStr string) (bool, error) {
+	if scanner.cache.Get(digestStr) != nil {
+		return true, nil
+	}
+
+	indexData, err := scanner.metaDB.GetImageMeta(godigest.Digest(digestStr))
+	if err != nil {
+		return false, err
+	}
+
+	if indexData.Index == nil {
+		return false, zerr.ErrUnexpectedMediaType
+	}
+
+	indexContent := *indexData.Index
+
+	if len(indexContent.Manifests) == 0 {
+		return true, nil
+	}
+
+	for _, manifest := range indexData.Manifests {
+		isScannable, err := scanner.isManifestDataScannable(manifest)
+		if err != nil {
+			continue
+		}
+
+		// if at least 1 manifest is scannable, the whole index is scannable
+		if isScannable {
+			return true, nil
+		}
+	}
+
+	return false, nil
+}
+
+func (scanner Scanner) IsResultCached(digest string) bool {
+	// Check if the entry exists in cache without updating the recent-ness
+	return scanner.cache.Contains(digest)
+}
+
+func (scanner Scanner) GetCachedResult(digest string) map[string]cvemodel.CVE {
+	return scanner.cache.Get(digest)
+}
+
+func (scanner Scanner) ScanImage(ctx context.Context, image string) (map[string]cvemodel.CVE, error) {
+	var (
+		originalImageInput = image
+		digest             string
+		mediaType          string
+	)
+
+	repo, ref, isTag := zcommon.GetImageDirAndReference(image)
+
+	digest = ref
+
+	if isTag {
+		imgDescriptor, err := getImageDescriptor(ctx, scanner.metaDB, repo, ref)
+		if err != nil {
+			return map[string]cvemodel.CVE{}, err
+		}
+
+		digest = imgDescriptor.Digest
+		mediaType = imgDescriptor.MediaType
+	} else {
+		var found bool
+
+		found, mediaType = findMediaTypeForDigest(scanner.metaDB, godigest.Digest(ref))
+		if !found {
+			return map[string]cvemodel.CVE{}, zerr.ErrManifestNotFound
+		}
+	}
+
+	var (
+		cveIDMap map[string]cvemodel.CVE
+		err      error
+	)
+
+	if mediaType == ispec.MediaTypeImageIndex ||
+		compat.IsCompatibleManifestListMediaType(mediaType) {
+		cveIDMap, err = scanner.scanIndex(ctx, repo, digest)
+	} else if mediaType == ispec.MediaTypeImageManifest ||
+		compat.IsCompatibleManifestMediaType(mediaType) {
+		cveIDMap, err = scanner.scanManifest(ctx, repo, digest)
+	}
+
+	if err != nil {
+		scanner.log.Error().Err(err).Str("image", originalImageInput).Msg("failed to scan image")
+
+		return map[string]cvemodel.CVE{}, err
+	}
+
+	return cveIDMap, nil
+}
+
+func (scanner Scanner) scanManifest(ctx context.Context, repo, digest string) (map[string]cvemodel.CVE, error) {
+	if cachedMap := scanner.cache.Get(digest); cachedMap != nil {
+		return cachedMap, nil
+	}
+
+	cveidMap := map[string]cvemodel.CVE{}
+	image := repo + "@" + digest
+
+	scanner.dbLock.Lock()
+	opts := scanner.getTrivyOptions(image)
+	report, sbom, err := scanner.runTrivy(ctx, opts)
+	scanner.dbLock.Unlock()
+	if sbom != nil && sbom.filePath != "" {
+		defer os.Remove(sbom.filePath)
+	}
+
+	if err != nil { //nolint: wsl
+		return cveidMap, err
+	}
+
+	// SBOM persistence is best-effort: CVE scanning should still complete even if
+	// SBOM artifact upload fails.
+	if err = scanner.storeSBOMAsOCIArtifact(ctx, repo, digest, sbom); err != nil {
+		scanner.log.Warn().Err(err).Str("image", image).Msg("failed to store generated sbom as OCI artifact")
+	}
+
+	for _, result := range report.Results {
+		for _, vulnerability := range result.Vulnerabilities {
+			pkgName := vulnerability.PkgName
+
+			installedVersion := vulnerability.InstalledVersion
+
+			var fixedVersion string
+			if vulnerability.FixedVersion != "" {
+				fixedVersion = vulnerability.FixedVersion
+			} else {
+				fixedVersion = "Not Specified"
+			}
+
+			var packagePath string
+			if vulnerability.PkgPath != "" {
+				packagePath = vulnerability.PkgPath
+			} else {
+				packagePath = "Not Specified"
+			}
+
+			_, ok := cveidMap[vulnerability.VulnerabilityID]
+			if ok {
+				cveDetailStruct := cveidMap[vulnerability.VulnerabilityID]
+
+				pkgList := cveDetailStruct.PackageList
+
+				pkgList = append(
+					pkgList,
+					cvemodel.Package{
+						Name:             pkgName,
+						PackagePath:      packagePath,
+						InstalledVersion: installedVersion,
+						FixedVersion:     fixedVersion,
+					},
+				)
+
+				cveDetailStruct.PackageList = pkgList
+
+				cveidMap[vulnerability.VulnerabilityID] = cveDetailStruct
+			} else {
+				newPkgList := make([]cvemodel.Package, 0)
+
+				newPkgList = append(
+					newPkgList,
+					cvemodel.Package{
+						Name:             pkgName,
+						PackagePath:      packagePath,
+						InstalledVersion: installedVersion,
+						FixedVersion:     fixedVersion,
+					},
+				)
+
+				cveidMap[vulnerability.VulnerabilityID] = cvemodel.CVE{
+					ID:          vulnerability.VulnerabilityID,
+					Title:       vulnerability.Title,
+					Description: vulnerability.Description,
+					Reference: getCVEReference(
+						vulnerability.VulnerabilityID,
+						vulnerability.PrimaryURL,
+						vulnerability.References,
+					),
+					Severity:    convertSeverity(vulnerability.Severity),
+					PackageList: newPkgList,
+				}
+			}
+		}
+	}
+
+	scanner.cache.Add(digest, cveidMap)
+
+	return cveidMap, nil
+}
+
+func (scanner Scanner) storeSBOMAsOCIArtifact(ctx context.Context,
+	repo, subjectDigest string, sbom *generatedSBOM,
+) error {
+	if !scanner.sbomOptions.enabled {
+		scanner.log.Debug().Str("repo", repo).Str("subject", subjectDigest).
+			Msg("skipping sbom artifact persistence: sbom support disabled")
+
+		return nil
+	}
+
+	if sbom == nil || sbom.filePath == "" {
+		scanner.log.Debug().Str("repo", repo).Str("subject", subjectDigest).
+			Msg("skipping sbom artifact persistence: no sbom file available")
+
+		return nil
+	}
+
+	imgStore := scanner.storeController.GetImageStore(repo)
+	if imgStore == nil {
+		scanner.log.Warn().Str("repo", repo).Msg("skipping sbom artifact persistence: image store not found")
+
+		return fmt.Errorf("%w for repo %q", errImageStoreNotFound, repo)
+	}
+
+	subject := godigest.Digest(subjectDigest)
+	if err := subject.Validate(); err != nil {
+		return err
+	}
+
+	subjectManifestBlob, _, subjectMediaType, err := imgStore.GetImageManifest(repo, subjectDigest)
+	if err != nil {
+		return err
+	}
+
+	referrers, err := imgStore.GetReferrers(repo, subject, []string{scanner.sbomOptions.artifactType})
+	if err == nil && len(referrers.Manifests) > 0 {
+		scanner.log.Debug().Str("repo", repo).Str("subject", subjectDigest).
+			Str("artifactType", scanner.sbomOptions.artifactType).
+			Msg("skipping sbom artifact persistence: referrer already exists")
+
+		return nil
+	}
+
+	sbomExists, _, err := imgStore.CheckBlob(ctx, repo, sbom.digest)
+	if err != nil && !errors.Is(err, zerr.ErrBlobNotFound) {
+		return err
+	}
+
+	if !sbomExists {
+		sbomFile, openErr := os.Open(sbom.filePath)
+		if openErr != nil {
+			return openErr
+		}
+
+		defer sbomFile.Close()
+
+		if _, _, err = imgStore.FullBlobUpload(ctx, repo, sbomFile, sbom.digest); err != nil {
+			return err
+		}
+
+		scanner.log.Debug().Str("repo", repo).Str("subject", subjectDigest).Str("digest", sbom.digest.String()).
+			Msg("uploaded sbom blob")
+	}
+
+	emptyConfigExists, _, err := imgStore.CheckBlob(ctx, repo, ispec.DescriptorEmptyJSON.Digest)
+	if err != nil && !errors.Is(err, zerr.ErrBlobNotFound) {
+		return err
+	}
+
+	if !emptyConfigExists {
+		if _, _, err = imgStore.FullBlobUpload(ctx, repo, bytes.NewReader(ispec.DescriptorEmptyJSON.Data),
+			ispec.DescriptorEmptyJSON.Digest); err != nil {
+			return err
+		}
+
+		scanner.log.Debug().Str("repo", repo).Str("digest", ispec.DescriptorEmptyJSON.Digest.String()).
+			Msg("uploaded empty config blob for sbom artifact")
+	}
+
+	sbomManifest := ispec.Manifest{
+		Versioned:    specs.Versioned{SchemaVersion: storageConstants.SchemaVersion},
+		MediaType:    ispec.MediaTypeImageManifest,
+		ArtifactType: scanner.sbomOptions.artifactType,
+		Subject: &ispec.Descriptor{
+			MediaType: subjectMediaType,
+			Digest:    subject,
+			Size:      int64(len(subjectManifestBlob)),
+		},
+		Config: ispec.Descriptor{
+			MediaType: ispec.MediaTypeEmptyJSON,
+			Digest:    ispec.DescriptorEmptyJSON.Digest,
+			Size:      int64(len(ispec.DescriptorEmptyJSON.Data)),
+		},
+		Layers: []ispec.Descriptor{
+			{
+				MediaType: scanner.sbomOptions.layerMediaType,
+				Digest:    sbom.digest,
+				Size:      sbom.size,
+			},
+		},
+	}
+
+	sbomManifestBlob, err := json.Marshal(sbomManifest)
+	if err != nil {
+		return err
+	}
+
+	sbomManifestDigest := godigest.FromBytes(sbomManifestBlob)
+	_, _, err = imgStore.PutImageManifest(ctx, repo, sbomManifestDigest.String(), ispec.MediaTypeImageManifest,
+		sbomManifestBlob, nil)
+	if err != nil {
+		return err
+	}
+
+	scanner.log.Debug().Str("repo", repo).Str("subject", subjectDigest).
+		Str("manifestDigest", sbomManifestDigest.String()).
+		Str("artifactType", scanner.sbomOptions.artifactType).
+		Msg("stored sbom as oci artifact manifest")
+
+	if scanner.metaDB != nil {
+		err = meta.OnUpdateManifest(ctx, repo, sbomManifestDigest.String(),
+			ispec.MediaTypeImageManifest, sbomManifestDigest, sbomManifestBlob,
+			scanner.storeController, scanner.metaDB, scanner.log)
+		if err != nil {
+			scanner.log.Warn().Err(err).Str("repo", repo).Str("subject", subjectDigest).
+				Str("manifestDigest", sbomManifestDigest.String()).
+				Msg("failed to persist sbom artifact metadata")
+
+			return err
+		}
+
+		scanner.log.Debug().Str("repo", repo).Str("subject", subjectDigest).
+			Str("manifestDigest", sbomManifestDigest.String()).
+			Msg("persisted sbom artifact metadata")
+	} else {
+		scanner.log.Debug().Str("repo", repo).Str("subject", subjectDigest).
+			Msg("skipping sbom artifact metadata persistence: metadb not configured")
+	}
+
+	return nil
+}
+
+func getCVEReference(cveID, primaryURL string, references []string) string {
+	if isCVEID(cveID) && isAquasecAVDReference(primaryURL) {
+		return "https://www.cve.org/CVERecord?id=" + cveID
+	}
+
+	if primaryURL != "" {
+		return primaryURL
+	}
+
+	if len(references) > 0 {
+		nvdReference, found := getNVDReference(references)
+
+		if found {
+			return nvdReference
+		}
+
+		return references[0]
+	}
+
+	return ""
+}
+
+func isCVEID(cveID string) bool {
+	return strings.HasPrefix(cveID, "CVE-")
+}
+
+func isAquasecAVDReference(reference string) bool {
+	return strings.Contains(reference, "avd.aquasec.com/nvd/cve-")
+}
+
+func getNVDReference(references []string) (string, bool) {
+	for i := range references {
+		if strings.Contains(references[i], "nvd.nist.gov") {
+			return references[i], true
+		}
+	}
+
+	return "", false
+}
+
+func (scanner Scanner) scanIndex(ctx context.Context, repo, digest string) (map[string]cvemodel.CVE, error) {
+	if cachedMap := scanner.cache.Get(digest); cachedMap != nil {
+		return cachedMap, nil
+	}
+
+	indexData, err := scanner.metaDB.GetImageMeta(godigest.Digest(digest))
+	if err != nil {
+		return map[string]cvemodel.CVE{}, err
+	}
+
+	if indexData.Index == nil {
+		return map[string]cvemodel.CVE{}, zerr.ErrUnexpectedMediaType
+	}
+
+	indexCveIDMap := map[string]cvemodel.CVE{}
+
+	for _, manifest := range indexData.Index.Manifests {
+		if isScannable, err := scanner.isManifestScanable(manifest.Digest.String()); isScannable && err == nil {
+			manifestCveIDMap, err := scanner.scanManifest(ctx, repo, manifest.Digest.String())
+			if err != nil {
+				return nil, err
+			}
+
+			maps.Copy(indexCveIDMap, manifestCveIDMap)
+		}
+	}
+
+	scanner.cache.Add(digest, indexCveIDMap)
+
+	return indexCveIDMap, nil
+}
+
+// UpdateDB downloads the Trivy DB / Cache under the store root directory.
+func (scanner Scanner) UpdateDB(ctx context.Context) error {
+	// We need a lock as using multiple substores each with its own DB
+	// can result in a DATARACE because some varibles in trivy-db are global
+	// https://github.com/project-zot/trivy-db/blob/main/pkg/db/db.go#L23
+	scanner.dbLock.Lock()
+	defer scanner.dbLock.Unlock()
+
+	if scanner.storeController.DefaultStore != nil {
+		dbDir := path.Join(scanner.storeController.DefaultStore.RootDir(), "_trivy")
+
+		err := scanner.updateDB(ctx, dbDir)
+		if err != nil {
+			return err
+		}
+	}
+
+	if scanner.storeController.SubStore != nil {
+		for _, storage := range scanner.storeController.SubStore {
+			dbDir := path.Join(storage.RootDir(), "_trivy")
+
+			err := scanner.updateDB(ctx, dbDir)
+			if err != nil {
+				return err
+			}
+		}
+	}
+
+	scanner.cache.Purge()
+
+	return nil
+}
+
+func (scanner Scanner) updateDB(ctx context.Context, dbDir string) error {
+	return scanner.withTempDir(func() error {
+		return scanner.updateDBInternal(ctx, dbDir)
+	})
+}
+
+func (scanner Scanner) updateDBInternal(ctx context.Context, dbDir string) error {
+	scanner.log.Debug().Str("dbDir", dbDir).Msg("download Trivy DB to destination dir")
+
+	registryOpts := fanalTypes.RegistryOptions{Insecure: false}
+
+	scanner.log.Debug().Str("dbDir", dbDir).Msg("started downloading trivy-db to destination dir")
+
+	dbRefs := []name.Reference{scanner.dbRepositoryRef}
+	javaDBRefs := []name.Reference{scanner.javaDBRepositoryRef}
+
+	err := operation.DownloadDB(ctx, "dev", dbDir, dbRefs, false, false, registryOpts)
+	if err != nil {
+		scanner.log.Error().Err(err).Str("dbDir", dbDir).
+			Str("dbRepository", scanner.dbRepositoryRef.String()).
+			Msg("failed to download trivy-db to destination dir")
+
+		return err
+	}
+
+	if scanner.javaDBRepositoryRef != nil {
+		javadb.Init(dbDir, javaDBRefs, false, false, registryOpts)
+
+		if err := javadb.Update(); err != nil {
+			scanner.log.Error().Err(err).Str("dbDir", dbDir).
+				Str("javaDBRepository", scanner.javaDBRepositoryRef.String()).
+				Msg("failed to download trivy-java-db to destination dir")
+
+			return err
+		}
+	}
+
+	scanner.log.Debug().Str("dbDir", dbDir).Msg("finished downloading trivy-db to destination dir")
+
+	return nil
+}
+
+// checkDBPresence errors if the DB metadata files cannot be accessed.
+func (scanner Scanner) checkDBPresence() error {
+	result := true
+
+	if scanner.storeController.DefaultStore != nil {
+		dbDir := path.Join(scanner.storeController.DefaultStore.RootDir(), "_trivy", "db")
+		if _, err := os.Stat(metadata.Path(dbDir)); err != nil {
+			result = false
+		}
+	}
+
+	if scanner.storeController.SubStore != nil {
+		for _, storage := range scanner.storeController.SubStore {
+			dbDir := path.Join(storage.RootDir(), "_trivy", "db")
+
+			if _, err := os.Stat(metadata.Path(dbDir)); err != nil {
+				result = false
+			}
+		}
+	}
+
+	if !result {
+		return zerr.ErrCVEDBNotFound
+	}
+
+	return nil
+}
+
+func getImageDescriptor(ctx context.Context, metaDB mTypes.MetaDB, repo, tag string) (mTypes.Descriptor, error) {
+	repoMeta, err := metaDB.GetRepoMeta(ctx, repo)
+	if err != nil {
+		return mTypes.Descriptor{}, err
+	}
+
+	imageDescriptor, ok := repoMeta.Tags[tag]
+	if !ok {
+		return mTypes.Descriptor{}, zerr.ErrTagMetaNotFound
+	}
+
+	return imageDescriptor, nil
+}
+
+// findMediaTypeForDigest will look into the buckets for a certain digest. Depending on which bucket that
+// digest is found the corresponding mediatype is returned.
+func findMediaTypeForDigest(metaDB mTypes.MetaDB, digest godigest.Digest) (bool, string) {
+	imageMeta, err := metaDB.GetImageMeta(digest)
+	if err == nil {
+		return true, imageMeta.MediaType
+	}
+
+	return false, ""
+}
+
+func convertSeverity(detectedSeverity string) string {
+	trivySeverity, _ := dbTypes.NewSeverity(detectedSeverity)
+
+	sevMap := map[dbTypes.Severity]string{
+		dbTypes.SeverityUnknown:  cvemodel.SeverityUnknown,
+		dbTypes.SeverityLow:      cvemodel.SeverityLow,
+		dbTypes.SeverityMedium:   cvemodel.SeverityMedium,
+		dbTypes.SeverityHigh:     cvemodel.SeverityHigh,
+		dbTypes.SeverityCritical: cvemodel.SeverityCritical,
+	}
+
+	return sevMap[trivySeverity]
+}

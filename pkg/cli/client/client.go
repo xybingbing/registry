@@ -1,0 +1,571 @@
+//go:build search
+
+package client
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"net/url"
+	"strconv"
+	"strings"
+	"sync"
+	"time"
+
+	ispec "github.com/opencontainers/image-spec/specs-go/v1"
+
+	zerr "zotregistry.dev/zot/v2/errors"
+	"zotregistry.dev/zot/v2/pkg/common"
+)
+
+// HTTPClient manages HTTP clients with TLS support and caching.
+type HTTPClient struct {
+	clients map[string]*http.Client
+	mu      sync.Mutex
+}
+
+// NewHTTPClient creates a new HTTPClient instance.
+func NewHTTPClient() *HTTPClient {
+	return &HTTPClient{
+		clients: make(map[string]*http.Client),
+	}
+}
+
+func (c *HTTPClient) makeGETRequest(ctx context.Context, url, username, password string,
+	verifyTLS bool, debug bool, resultsPtr any, configWriter io.Writer,
+) (http.Header, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	req.SetBasicAuth(username, password)
+
+	return c.doHTTPRequest(req, verifyTLS, debug, resultsPtr, configWriter)
+}
+
+func (c *HTTPClient) makeHEADRequest(ctx context.Context, url, username, password string, verifyTLS bool,
+	debug bool,
+) (http.Header, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodHead, url, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	req.SetBasicAuth(username, password)
+
+	return c.doHTTPRequest(req, verifyTLS, debug, nil, io.Discard)
+}
+
+func (c *HTTPClient) makeGraphQLRequest(ctx context.Context, url, query, username,
+	password string, verifyTLS bool, debug bool, resultsPtr any, configWriter io.Writer,
+) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, bytes.NewBufferString(query))
+	if err != nil {
+		return err
+	}
+
+	q := req.URL.Query()
+	q.Add("query", query)
+
+	req.URL.RawQuery = q.Encode()
+
+	req.SetBasicAuth(username, password)
+	req.Header.Add("Content-Type", "application/json")
+
+	_, err = c.doHTTPRequest(req, verifyTLS, debug, resultsPtr, configWriter)
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func (c *HTTPClient) doHTTPRequest(req *http.Request, verifyTLS bool, debug bool,
+	resultsPtr any, configWriter io.Writer,
+) (http.Header, error) {
+	var httpClient *http.Client
+
+	var err error
+
+	host := req.Host
+
+	enableTLS := req.URL.Scheme != "http"
+	if verifyTLS {
+		// we want TLS enabled when verifyTLS is true
+		enableTLS = true
+	}
+
+	c.mu.Lock()
+
+	if c.clients[host] == nil {
+		httpClient, err = common.CreateHTTPClient(&common.HTTPClientOptions{
+			TLSEnabled:  enableTLS,
+			VerifyTLS:   verifyTLS,
+			Host:        host,
+			CertOptions: common.HTTPClientCertOptions{},
+		})
+		if err != nil {
+			c.mu.Unlock()
+
+			return nil, err
+		}
+
+		c.clients[host] = httpClient
+	} else {
+		httpClient = c.clients[host]
+	}
+
+	c.mu.Unlock()
+
+	if debug {
+		fmt.Fprintln(configWriter, "[debug] ", req.Method, " ", req.URL, "[request header] ", req.Header)
+	}
+
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+
+	if debug {
+		fmt.Fprintln(configWriter, "[debug] ", req.Method, req.URL, "[status] ",
+			resp.StatusCode, " ", "[response header] ", resp.Header)
+	}
+
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		var err error
+
+		switch resp.StatusCode {
+		case http.StatusNotFound:
+			err = zerr.ErrURLNotFound
+		case http.StatusUnauthorized:
+			err = zerr.ErrUnauthorizedAccess
+		default:
+			err = zerr.ErrBadHTTPStatusCode
+		}
+
+		bodyBytes, _ := io.ReadAll(resp.Body)
+
+		return nil, fmt.Errorf("%w: Expected: %d, Got: %d, Body: '%s'", err, http.StatusOK,
+			resp.StatusCode, string(bodyBytes))
+	}
+
+	if resultsPtr == nil {
+		return resp.Header, nil
+	}
+
+	if err := json.NewDecoder(resp.Body).Decode(resultsPtr); err != nil {
+		return nil, err
+	}
+
+	return resp.Header, nil
+}
+
+func validateURL(str string) error {
+	parsedURL, err := url.Parse(str)
+	if err != nil {
+		if strings.Contains(err.Error(), "first path segment in URL cannot contain colon") {
+			return fmt.Errorf("%w: scheme not provided (ex: https://)", zerr.ErrInvalidURL)
+		}
+
+		return err
+	}
+
+	if parsedURL.Scheme == "" || parsedURL.Host == "" {
+		return fmt.Errorf("%w: scheme not provided (ex: https://)", zerr.ErrInvalidURL)
+	}
+
+	return nil
+}
+
+type requestsPool struct {
+	jobs     chan *httpJob
+	done     chan struct{}
+	wtgrp    *sync.WaitGroup
+	outputCh chan stringResult
+}
+
+type httpJob struct {
+	url       string
+	username  string
+	password  string
+	imageName string
+	tagName   string
+	config    SearchConfig
+}
+
+const rateLimiterBuffer = 5000
+
+func newSmoothRateLimiter(wtgrp *sync.WaitGroup, opch chan stringResult) *requestsPool {
+	ch := make(chan *httpJob, rateLimiterBuffer)
+
+	return &requestsPool{
+		jobs:     ch,
+		done:     make(chan struct{}),
+		wtgrp:    wtgrp,
+		outputCh: opch,
+	}
+}
+
+// block every "rateLimit" time duration.
+const rateLimit = 100 * time.Millisecond
+
+func (p *requestsPool) startRateLimiter(ctx context.Context) {
+	p.wtgrp.Done()
+
+	throttle := time.NewTicker(rateLimit).C
+
+	for {
+		select {
+		case job := <-p.jobs:
+			go p.doJob(ctx, job)
+		case <-p.done:
+			return
+		}
+		<-throttle
+	}
+}
+
+func (p *requestsPool) doJob(ctx context.Context, job *httpJob) {
+	defer p.wtgrp.Done()
+
+	// Check manifest media type
+	httpClient := job.config.SearchService.getHTTPClient()
+	header, err := httpClient.makeHEADRequest(ctx, job.url, job.username, job.password, job.config.VerifyTLS,
+		job.config.Debug)
+	if err != nil {
+		if common.IsContextDone(ctx) {
+			return
+		}
+		p.outputCh <- stringResult{"", err}
+	}
+
+	verbose := job.config.Verbose
+
+	switch header.Get("Content-Type") {
+	case ispec.MediaTypeImageManifest:
+		image, err := fetchImageManifestStruct(ctx, job)
+		if err != nil {
+			if common.IsContextDone(ctx) {
+				return
+			}
+			p.outputCh <- stringResult{"", err}
+
+			return
+		}
+		platformStr := getPlatformStr(image.Manifests[0].Platform)
+
+		str, err := image.string(job.config.OutputFormat, len(job.imageName), len(job.tagName), len(platformStr), verbose)
+		if err != nil {
+			if common.IsContextDone(ctx) {
+				return
+			}
+			p.outputCh <- stringResult{"", err}
+
+			return
+		}
+
+		if common.IsContextDone(ctx) {
+			return
+		}
+
+		p.outputCh <- stringResult{str, nil}
+	case ispec.MediaTypeImageIndex:
+		image, err := fetchImageIndexStruct(ctx, job)
+		if err != nil {
+			if common.IsContextDone(ctx) {
+				return
+			}
+			p.outputCh <- stringResult{"", err}
+
+			return
+		}
+
+		platformStr := getPlatformStr(image.Manifests[0].Platform)
+
+		str, err := image.string(job.config.OutputFormat, len(job.imageName), len(job.tagName), len(platformStr), verbose)
+		if err != nil {
+			if common.IsContextDone(ctx) {
+				return
+			}
+			p.outputCh <- stringResult{"", err}
+
+			return
+		}
+
+		if common.IsContextDone(ctx) {
+			return
+		}
+
+		p.outputCh <- stringResult{str, nil}
+	default:
+		return
+	}
+}
+
+func fetchImageIndexStruct(ctx context.Context, job *httpJob) (*imageStruct, error) {
+	var indexContent ispec.Index
+
+	httpClient := job.config.SearchService.getHTTPClient()
+	header, err := httpClient.makeGETRequest(ctx, job.url, job.username, job.password,
+		job.config.VerifyTLS, job.config.Debug, &indexContent, job.config.ResultWriter)
+	if err != nil {
+		if common.IsContextDone(ctx) {
+			return nil, context.Canceled
+		}
+
+		return nil, err
+	}
+
+	indexDigest := header.Get("Docker-Content-Digest")
+
+	indexSize, err := strconv.ParseInt(header.Get("Content-Length"), 10, 64)
+	if err != nil {
+		return nil, err
+	}
+
+	imageSize := indexSize
+
+	manifestList := make([]common.ManifestSummary, 0, len(indexContent.Manifests))
+
+	for _, manifestDescriptor := range indexContent.Manifests {
+		manifest, err := fetchManifestStruct(ctx, job.imageName, manifestDescriptor.Digest.String(),
+			job.config, job.username, job.password)
+		if err != nil {
+			return nil, err
+		}
+
+		imageSize += int64(atoiWithDefault(manifest.Size, 0))
+
+		if manifestDescriptor.Platform != nil {
+			manifest.Platform = common.Platform{
+				Os:      manifestDescriptor.Platform.OS,
+				Arch:    manifestDescriptor.Platform.Architecture,
+				Variant: manifestDescriptor.Platform.Variant,
+			}
+		}
+
+		manifestList = append(manifestList, manifest)
+	}
+
+	isIndexSigned := isCosignSigned(ctx, job.imageName, indexDigest, job.config, job.username, job.password) ||
+		isNotationSigned(ctx, job.imageName, indexDigest, job.config, job.username, job.password)
+
+	return &imageStruct{
+		RepoName:  job.imageName,
+		Tag:       job.tagName,
+		Digest:    indexDigest,
+		MediaType: ispec.MediaTypeImageIndex,
+		Manifests: manifestList,
+		Size:      strconv.FormatInt(imageSize, 10),
+		IsSigned:  isIndexSigned,
+	}, nil
+}
+
+func atoiWithDefault(size string, defaultVal int) int {
+	val, err := strconv.Atoi(size)
+	if err != nil {
+		return defaultVal
+	}
+
+	return val
+}
+
+func fetchImageManifestStruct(ctx context.Context, job *httpJob) (*imageStruct, error) {
+	manifest, err := fetchManifestStruct(ctx, job.imageName, job.tagName, job.config, job.username, job.password)
+	if err != nil {
+		return nil, err
+	}
+
+	return &imageStruct{
+		RepoName:  job.imageName,
+		Tag:       job.tagName,
+		Digest:    manifest.Digest,
+		MediaType: ispec.MediaTypeImageManifest,
+		Manifests: []common.ManifestSummary{
+			manifest,
+		},
+		Size:     manifest.Size,
+		IsSigned: manifest.IsSigned,
+	}, nil
+}
+
+func fetchManifestStruct(ctx context.Context, repo, manifestReference string, searchConf SearchConfig,
+	username, password string,
+) (common.ManifestSummary, error) {
+	manifestResp := ispec.Manifest{}
+
+	httpClient := searchConf.SearchService.getHTTPClient()
+	URL := fmt.Sprintf("%s/v2/%s/manifests/%s",
+		searchConf.ServURL, repo, manifestReference)
+
+	header, err := httpClient.makeGETRequest(ctx, URL, username, password,
+		searchConf.VerifyTLS, searchConf.Debug, &manifestResp, searchConf.ResultWriter)
+	if err != nil {
+		if common.IsContextDone(ctx) {
+			return common.ManifestSummary{}, context.Canceled
+		}
+
+		return common.ManifestSummary{}, err
+	}
+
+	manifestDigest := header.Get("Docker-Content-Digest")
+	configDigest := manifestResp.Config.Digest.String()
+
+	configContent, err := fetchConfig(ctx, repo, configDigest, searchConf, username, password)
+	if err != nil {
+		if common.IsContextDone(ctx) {
+			return common.ManifestSummary{}, context.Canceled
+		}
+
+		return common.ManifestSummary{}, err
+	}
+
+	opSys := ""
+	arch := ""
+	variant := ""
+
+	if manifestResp.Config.Platform != nil {
+		opSys = manifestResp.Config.Platform.OS
+		arch = manifestResp.Config.Platform.Architecture
+		variant = manifestResp.Config.Platform.Variant
+	}
+
+	if opSys == "" {
+		opSys = configContent.OS
+	}
+
+	if arch == "" {
+		arch = configContent.Architecture
+	}
+
+	if variant == "" {
+		variant = configContent.Variant
+	}
+
+	manifestSize, err := strconv.ParseInt(header.Get("Content-Length"), 10, 64)
+	if err != nil {
+		return common.ManifestSummary{}, err
+	}
+
+	var imageSize int64
+
+	imageSize += manifestResp.Config.Size
+	imageSize += manifestSize
+
+	// Pre-allocate slice with known capacity
+	layers := make([]common.LayerSummary, 0, len(manifestResp.Layers))
+
+	for _, entry := range manifestResp.Layers {
+		imageSize += entry.Size
+
+		layers = append(
+			layers,
+			common.LayerSummary{
+				Size:   strconv.FormatInt(entry.Size, 10),
+				Digest: entry.Digest.String(),
+			},
+		)
+	}
+
+	isSigned := isCosignSigned(ctx, repo, manifestDigest, searchConf, username, password) ||
+		isNotationSigned(ctx, repo, manifestDigest, searchConf, username, password)
+
+	return common.ManifestSummary{
+		ConfigDigest: configDigest,
+		Digest:       manifestDigest,
+		Layers:       layers,
+		Platform:     common.Platform{Os: opSys, Arch: arch, Variant: variant},
+		Size:         strconv.FormatInt(imageSize, 10),
+		IsSigned:     isSigned,
+	}, nil
+}
+
+func fetchConfig(ctx context.Context, repo, configDigest string, searchConf SearchConfig,
+	username, password string,
+) (ispec.Image, error) {
+	configContent := ispec.Image{}
+
+	httpClient := searchConf.SearchService.getHTTPClient()
+	URL := fmt.Sprintf("%s/v2/%s/blobs/%s",
+		searchConf.ServURL, repo, configDigest)
+
+	_, err := httpClient.makeGETRequest(ctx, URL, username, password,
+		searchConf.VerifyTLS, searchConf.Debug, &configContent, searchConf.ResultWriter)
+	if err != nil {
+		if common.IsContextDone(ctx) {
+			return ispec.Image{}, context.Canceled
+		}
+
+		return ispec.Image{}, err
+	}
+
+	return configContent, nil
+}
+
+func isNotationSigned(ctx context.Context, repo, digestStr string, searchConf SearchConfig,
+	username, password string,
+) bool {
+	var referrers ispec.Index
+
+	httpClient := searchConf.SearchService.getHTTPClient()
+	URL := fmt.Sprintf("%s/v2/%s/referrers/%s?artifactType=%s",
+		searchConf.ServURL, repo, digestStr, common.ArtifactTypeNotation)
+
+	_, err := httpClient.makeGETRequest(ctx, URL, username, password,
+		searchConf.VerifyTLS, searchConf.Debug, &referrers, searchConf.ResultWriter)
+	if err != nil {
+		return false
+	}
+
+	if len(referrers.Manifests) > 0 {
+		return true
+	}
+
+	return false
+}
+
+func isCosignSigned(ctx context.Context, repo, digestStr string, searchConf SearchConfig,
+	username, password string,
+) bool {
+	httpClient := searchConf.SearchService.getHTTPClient()
+
+	var result any
+	cosignTag := strings.Replace(digestStr, ":", "-", 1) + "." + common.CosignSignatureTagSuffix
+
+	URL := fmt.Sprintf("%s/v2/%s/manifests/%s", searchConf.ServURL, repo, cosignTag)
+
+	_, err := httpClient.makeGETRequest(ctx, URL, username, password, searchConf.VerifyTLS,
+		searchConf.Debug, &result, searchConf.ResultWriter)
+	if err == nil {
+		return true
+	}
+
+	for _, artifactType := range []string{common.ArtifactTypeCosign, common.ArtifactTypeCosignBundle} {
+		var referrers ispec.Index
+
+		URL = fmt.Sprintf("%s/v2/%s/referrers/%s?artifactType=%s",
+			searchConf.ServURL, repo, digestStr, url.QueryEscape(artifactType))
+
+		_, err = httpClient.makeGETRequest(ctx, URL, username, password, searchConf.VerifyTLS,
+			searchConf.Debug, &referrers, searchConf.ResultWriter)
+		if err != nil {
+			continue
+		}
+
+		if len(referrers.Manifests) > 0 {
+			return true
+		}
+	}
+
+	return false
+}
+
+func (p *requestsPool) submitJob(job *httpJob) {
+	p.jobs <- job
+}

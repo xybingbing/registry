@@ -1,0 +1,34 @@
+package types
+
+import (
+	"context"
+	"time"
+
+	ispec "github.com/opencontainers/image-spec/specs-go/v1"
+
+	mTypes "zotregistry.dev/zot/v2/pkg/meta/types"
+)
+
+type Candidate struct {
+	DigestStr     string
+	MediaType     string
+	Tag           string
+	PushTimestamp time.Time
+	PullTimestamp time.Time
+	RetainedBy    string
+}
+
+type PolicyManager interface {
+	HasDeleteReferrer(repo string) bool
+	HasDeleteUntagged(repo string) bool
+	HasUntaggedRetention(repo string) bool
+	HasTagRetention(repo string) bool
+	GetRetainedTagsFromIndex(ctx context.Context, repo string, index ispec.Index) []string
+	GetRetainedTagsFromMetaDB(ctx context.Context, repoMeta mTypes.RepoMeta, index ispec.Index) []string
+	GetRetainedUntaggedFromMetaDB(ctx context.Context, repoMeta mTypes.RepoMeta, index ispec.Index) []string
+}
+
+type Rule interface {
+	Name() string
+	Perform(candidates []*Candidate) []*Candidate
+}

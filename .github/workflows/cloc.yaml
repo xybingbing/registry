@@ -1,0 +1,41 @@
+name: "Lines of code statistics"
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+  release:
+    types:
+      - published
+
+permissions: read-all
+
+jobs:
+  loc:
+    name: Lines of code
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          cache: false
+          check-latest: true
+          go-version: 1.26.x
+      - name: Check out source code
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - name: Install dependencies
+        run: |
+          cd $GITHUB_WORKSPACE
+          go install github.com/hhatto/gocloc/cmd/gocloc@latest
+      - name: All sources
+        run: |
+          cd $GITHUB_WORKSPACE
+          gocloc .
+      - name: All sources (except tests)
+        run: |
+          cd $GITHUB_WORKSPACE
+          gocloc --not-match='.*_test.go' .

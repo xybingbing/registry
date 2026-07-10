@@ -1,0 +1,89 @@
+package image
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+
+	godigest "github.com/opencontainers/go-digest"
+
+	stypes "zotregistry.dev/zot/v2/pkg/storage/types"
+)
+
+func WriteImageToFileSystem(image Image, repoName, ref string, storeController stypes.StoreController) error {
+	store := storeController.GetImageStore(repoName)
+
+	err := store.InitRepo(context.Background(), repoName)
+	if err != nil {
+		return err
+	}
+
+	digestAlgorithm := image.digestAlgorithm
+
+	if digestAlgorithm == "" {
+		digestAlgorithm = godigest.Canonical
+	}
+
+	for _, layerBlob := range image.Layers {
+		layerReader := bytes.NewReader(layerBlob)
+		layerDigest := digestAlgorithm.FromBytes(layerBlob)
+
+		_, _, err = store.FullBlobUpload(context.Background(), repoName, layerReader, layerDigest)
+		if err != nil {
+			return err
+		}
+	}
+
+	configBlob, err := json.Marshal(image.Config)
+	if err != nil {
+		return err
+	}
+
+	configReader := bytes.NewReader(configBlob)
+	configDigest := digestAlgorithm.FromBytes(configBlob)
+
+	_, _, err = store.FullBlobUpload(context.Background(), repoName, configReader, configDigest)
+	if err != nil {
+		return err
+	}
+
+	manifestBlob, err := json.Marshal(image.Manifest)
+	if err != nil {
+		return err
+	}
+
+	_, _, err = store.PutImageManifest(context.Background(), repoName, ref, image.Manifest.MediaType, manifestBlob, nil)
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func WriteMultiArchImageToFileSystem(multiarchImage MultiarchImage, repoName, ref string,
+	storeController stypes.StoreController,
+) error {
+	store := storeController.GetImageStore(repoName)
+
+	err := store.InitRepo(context.Background(), repoName)
+	if err != nil {
+		return err
+	}
+
+	for _, image := range multiarchImage.Images {
+		err := WriteImageToFileSystem(image, repoName, image.DigestStr(), storeController)
+		if err != nil {
+			return err
+		}
+	}
+
+	indexBlob, err := json.Marshal(multiarchImage.Index)
+	if err != nil {
+		return err
+	}
+
+	_, _, err = store.PutImageManifest(context.Background(), repoName, ref, multiarchImage.Index.MediaType,
+		indexBlob, nil)
+
+	return err
+}

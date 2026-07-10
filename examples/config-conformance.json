@@ -1,0 +1,15 @@
+{
+  "distSpecVersion": "1.1.1",
+  "storage": {
+    "rootDirectory": "/tmp/zot",
+    "gc": true,
+    "dedupe": false
+  },
+  "http": {
+    "address": "0.0.0.0",
+    "port": "8080"
+  },
+  "log": {
+    "level": "debug"
+  }
+}

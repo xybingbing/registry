@@ -1,0 +1,239 @@
+package image
+
+import (
+	"encoding/json"
+
+	dockerList "github.com/distribution/distribution/v3/manifest/manifestlist"
+	godigest "github.com/opencontainers/go-digest"
+	"github.com/opencontainers/image-spec/specs-go"
+	ispec "github.com/opencontainers/image-spec/specs-go/v1"
+
+	mTypes "zotregistry.dev/zot/v2/pkg/meta/types"
+)
+
+type MultiarchImage struct {
+	Index           ispec.Index
+	Images          []Image
+	digestAlgorithm godigest.Algorithm
+
+	IndexDescriptor ispec.Descriptor
+}
+
+func (mi *MultiarchImage) Digest() godigest.Digest {
+	indexBlob, err := json.Marshal(mi.Index)
+	if err != nil {
+		panic("unreachable: ispec.Index should always be marshable")
+	}
+
+	digestAlgorithm := mi.digestAlgorithm
+
+	if digestAlgorithm == "" {
+		digestAlgorithm = godigest.Canonical
+	}
+
+	return digestAlgorithm.FromBytes(indexBlob)
+}
+
+func (mi *MultiarchImage) DigestStr() string {
+	return mi.Digest().String()
+}
+
+func (mi *MultiarchImage) DescriptorRef() *ispec.Descriptor {
+	return &ispec.Descriptor{
+		MediaType:    mi.IndexDescriptor.MediaType,
+		Digest:       mi.IndexDescriptor.Digest,
+		Size:         mi.IndexDescriptor.Size,
+		Platform:     mi.IndexDescriptor.Platform,
+		Annotations:  mi.IndexDescriptor.Annotations,
+		ArtifactType: mi.IndexDescriptor.ArtifactType,
+	}
+}
+
+func (mi *MultiarchImage) DigestForAlgorithm(digestAlgorithm godigest.Algorithm) godigest.Digest {
+	blob, err := json.Marshal(mi.Index)
+	if err != nil {
+		panic("unreachable: ispec.Index should always be marshable")
+	}
+
+	return digestAlgorithm.FromBytes(blob)
+}
+
+func (mi MultiarchImage) AsImageMeta() mTypes.ImageMeta {
+	index := mi.Index
+
+	manifests := make([]mTypes.ManifestMeta, 0, len(index.Manifests))
+
+	for _, image := range mi.Images {
+		manifests = append(manifests, image.AsImageMeta().Manifests...)
+	}
+
+	return mTypes.ImageMeta{
+		MediaType: ispec.MediaTypeImageIndex,
+		Digest:    mi.IndexDescriptor.Digest,
+		Size:      mi.IndexDescriptor.Size,
+		Index:     &index,
+		Manifests: manifests,
+	}
+}
+
+func (mi MultiarchImage) AsDockerImage() MultiarchImage {
+	for i := range mi.Images {
+		mi.Images[i] = mi.Images[i].AsDockerImage()
+	}
+
+	mi.Index.MediaType = dockerList.MediaTypeManifestList
+	for i := range mi.Index.Manifests {
+		mi.Index.Manifests[i].Digest = mi.Images[i].ManifestDescriptor.Digest
+		mi.Index.Manifests[i].Size = mi.Images[i].ManifestDescriptor.Size
+		mi.Index.Manifests[i].MediaType = mi.Images[i].ManifestDescriptor.MediaType
+	}
+
+	indexBlob, err := json.Marshal(mi.Index)
+	if err != nil {
+		panic("unreachable: ispec.Index should always be marshable")
+	}
+
+	mi.IndexDescriptor.MediaType = dockerList.MediaTypeManifestList
+	mi.IndexDescriptor = ispec.Descriptor{
+		MediaType: dockerList.MediaTypeManifestList,
+		Digest:    mi.digestAlgorithm.FromBytes(indexBlob),
+		Size:      int64(len(indexBlob)),
+		Data:      indexBlob,
+	}
+
+	return mi
+}
+
+type ImagesBuilder interface {
+	Images(images []Image) MultiarchBuilder
+	RandomImages(count int) MultiarchBuilder
+}
+
+type MultiarchBuilder interface {
+	Subject(subject *ispec.Descriptor) MultiarchBuilder
+	ArtifactType(artifactType string) MultiarchBuilder
+	Annotations(annotations map[string]string) MultiarchBuilder
+	Build() MultiarchImage
+}
+
+func CreateMultiarchWith() ImagesBuilder {
+	return &BaseMultiarchBuilder{
+		digestAlgorithm: godigest.Canonical,
+	}
+}
+
+func CreateMultiarchWithDigestAlgorithm(digestAlgorithm godigest.Algorithm) ImagesBuilder {
+	return &BaseMultiarchBuilder{
+		digestAlgorithm: digestAlgorithm,
+	}
+}
+
+func CreateRandomMultiarch() MultiarchImage {
+	return CreateMultiarchWith().
+		Images([]Image{
+			CreateRandomImage(),
+			CreateRandomImage(),
+			CreateRandomImage(),
+		}).
+		Build()
+}
+
+func CreateVulnerableMultiarch() MultiarchImage {
+	return CreateMultiarchWith().
+		Images([]Image{
+			CreateRandomImage(),
+			CreateRandomVulnerableImage(),
+			CreateRandomImage(),
+		}).
+		Build()
+}
+
+type BaseMultiarchBuilder struct {
+	images          []Image
+	subject         *ispec.Descriptor
+	artifactType    string
+	annotations     map[string]string
+	digestAlgorithm godigest.Algorithm
+}
+
+func (mb *BaseMultiarchBuilder) Images(images []Image) MultiarchBuilder {
+	mb.images = images
+
+	return mb
+}
+
+func (mb *BaseMultiarchBuilder) RandomImages(count int) MultiarchBuilder {
+	images := make([]Image, count)
+
+	for i := range images {
+		images[i] = CreateRandomImage()
+	}
+
+	mb.images = images
+
+	return mb
+}
+
+func (mb *BaseMultiarchBuilder) Subject(subject *ispec.Descriptor) MultiarchBuilder {
+	mb.subject = subject
+
+	return mb
+}
+
+func (mb *BaseMultiarchBuilder) ArtifactType(artifactType string) MultiarchBuilder {
+	mb.artifactType = artifactType
+
+	return mb
+}
+
+func (mb *BaseMultiarchBuilder) Annotations(annotations map[string]string) MultiarchBuilder {
+	mb.annotations = annotations
+
+	return mb
+}
+
+func (mb *BaseMultiarchBuilder) Build() MultiarchImage {
+	manifests := make([]ispec.Descriptor, len(mb.images))
+
+	for i := range manifests {
+		manifests[i] = ispec.Descriptor{
+			Digest:       mb.images[i].ManifestDescriptor.Digest,
+			Size:         mb.images[i].ManifestDescriptor.Size,
+			MediaType:    ispec.MediaTypeImageManifest,
+			Platform:     mb.images[i].ManifestDescriptor.Platform,
+			Annotations:  mb.images[i].ManifestDescriptor.Annotations,
+			ArtifactType: mb.images[i].ManifestDescriptor.ArtifactType,
+		}
+	}
+
+	version := 2
+
+	index := ispec.Index{
+		Versioned:    specs.Versioned{SchemaVersion: version},
+		MediaType:    ispec.MediaTypeImageIndex,
+		Manifests:    manifests,
+		Annotations:  mb.annotations,
+		Subject:      mb.subject,
+		ArtifactType: mb.artifactType,
+	}
+
+	indexBlob, err := json.Marshal(index)
+	if err != nil {
+		panic("unreachable: ispec.Index should always be marshable")
+	}
+
+	indexDigest := mb.digestAlgorithm.FromBytes(indexBlob)
+
+	return MultiarchImage{
+		Index:           index,
+		Images:          mb.images,
+		digestAlgorithm: mb.digestAlgorithm,
+
+		IndexDescriptor: ispec.Descriptor{
+			MediaType: ispec.MediaTypeImageIndex,
+			Size:      int64(len(indexBlob)),
+			Digest:    indexDigest,
+			Data:      indexBlob,
+		},
+	}
+}
