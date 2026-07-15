@@ -3,9 +3,11 @@
 package extensions
 
 import (
+	"compress/gzip"
 	"embed"
 	"io/fs"
 	"net/http"
+	"path"
 	"strings"
 
 	"github.com/gorilla/mux"
@@ -24,8 +26,19 @@ type uiHandler struct {
 	log log.Logger
 }
 
+type gzipResponseWriter struct {
+	http.ResponseWriter
+	writer *gzip.Writer
+}
+
+func (grw gzipResponseWriter) Write(data []byte) (int, error) {
+	return grw.writer.Write(data)
+}
+
 func (uih uiHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	buf, _ := content.ReadFile("build/index.html")
+
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 
 	_, err := w.Write(buf)
 	if err != nil {
@@ -59,6 +72,55 @@ func addUISecurityHeaders(h http.Handler) http.HandlerFunc { //nolint:varnamelen
 	}
 }
 
+func addUIAssetHeaders(h http.Handler) http.HandlerFunc { //nolint:varnamelen
+	return func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/assets/") {
+			w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+		} else {
+			w.Header().Set("Cache-Control", "no-cache")
+		}
+
+		h.ServeHTTP(w, r)
+	}
+}
+
+func addUIGzip(h http.Handler) http.HandlerFunc { //nolint:varnamelen
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !strings.Contains(r.Header.Get("Accept-Encoding"), "gzip") || !shouldGzipUIPath(r.URL.Path) {
+			h.ServeHTTP(w, r)
+
+			return
+		}
+
+		w.Header().Set("Content-Encoding", "gzip")
+		w.Header().Add("Vary", "Accept-Encoding")
+		w.Header().Del("Content-Length")
+
+		gzw := gzip.NewWriter(w)
+		defer gzw.Close()
+
+		h.ServeHTTP(gzipResponseWriter{ResponseWriter: w, writer: gzw}, r)
+	}
+}
+
+func shouldGzipUIPath(requestPath string) bool {
+	switch path.Ext(requestPath) {
+	case ".js", ".css", ".html", ".json", ".svg":
+		return true
+	default:
+		return requestPath == "/" ||
+			strings.HasPrefix(requestPath, "/login") ||
+			strings.HasPrefix(requestPath, "/home") ||
+			strings.HasPrefix(requestPath, "/explore") ||
+			strings.HasPrefix(requestPath, "/image") ||
+			strings.HasPrefix(requestPath, "/user")
+	}
+}
+
+func uiHeaders(h http.Handler) http.Handler {
+	return addUISecurityHeaders(addUIAssetHeaders(addUIGzip(h)))
+}
+
 func SetupUIRoutes(conf *config.Config, router *mux.Router,
 	log log.Logger,
 ) {
@@ -83,17 +145,17 @@ func SetupUIRoutes(conf *config.Config, router *mux.Router,
 	allowedMethods := zcommon.AllowedMethods(http.MethodGet)
 
 	router.PathPrefix("/login").Methods(allowedMethods...).
-		Handler(addUISecurityHeaders(uih))
+		Handler(uiHeaders(uih))
 	router.PathPrefix("/home").Methods(allowedMethods...).
-		Handler(addUISecurityHeaders(uih))
+		Handler(uiHeaders(uih))
 	router.PathPrefix("/explore").Methods(allowedMethods...).
-		Handler(addUISecurityHeaders(uih))
+		Handler(uiHeaders(uih))
 	router.PathPrefix("/image").Methods(allowedMethods...).
-		Handler(addUISecurityHeaders(uih))
+		Handler(uiHeaders(uih))
 	router.PathPrefix("/user").Methods(allowedMethods...).
-		Handler(addUISecurityHeaders(uih))
+		Handler(uiHeaders(uih))
 	router.PathPrefix("/").Methods(allowedMethods...).
-		Handler(addUISecurityHeaders(http.FileServer(http.FS(fsub))))
+		Handler(uiHeaders(http.FileServer(http.FS(fsub))))
 
 	log.Info().Msg("finished setting up ui routes")
 }
