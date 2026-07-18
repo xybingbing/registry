@@ -42,23 +42,6 @@
           "tlsVerify": true
         },
         {
-          "urls": ["https://registry.linkease.net:5443"],
-          "onDemand": true,
-          "tlsVerify": true,
-          "maxRetries": 3,
-          "retryDelay": "5m",
-          "preserveDigest": true,
-          "syncTimeout": "10m",
-          "content": [{
-            "prefix": "library/**",
-            "tags": { "regex": ".*" },
-            "platforms": [
-              { "os": "linux", "arch": "arm64" },
-              { "os": "linux", "arch": "amd64" }
-            ]
-          }]
-        },
-        {
           "urls": ["https://quay.io"],
           "hostPrefix": "quay",
           "onDemand": true,
@@ -81,6 +64,42 @@
         {
           "urls": ["https://ghcr.io"],
           "hostPrefix": "ghcr",
+          "onDemand": true,
+          "tlsVerify": true,
+          "maxRetries": 3,
+          "retryDelay": "5m",
+          "preserveDigest": true,
+          "syncTimeout": "10m",
+          "content": [{
+            "prefix": "**",
+            "tags": { "regex": ".*" },
+            "platforms": [
+              { "os": "linux", "arch": "arm64" },
+              { "os": "linux", "arch": "amd64" }
+            ]
+          }]
+        },
+        {
+          "urls": ["https://gcr.io"],
+          "hostPrefix": "gcr",
+          "onDemand": true,
+          "tlsVerify": true,
+          "maxRetries": 3,
+          "retryDelay": "5m",
+          "preserveDigest": true,
+          "syncTimeout": "10m",
+          "content": [{
+            "prefix": "**",
+            "tags": { "regex": ".*" },
+            "platforms": [
+              { "os": "linux", "arch": "arm64" },
+              { "os": "linux", "arch": "amd64" }
+            ]
+          }]
+        },
+        {
+          "urls": ["https://registry.k8s.io"],
+          "hostPrefix": "k8s",
           "onDemand": true,
           "tlsVerify": true,
           "maxRetries": 3,
