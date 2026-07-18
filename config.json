@@ -52,8 +52,6 @@
           "syncTimeout": "10m",
           "content": [{
             "prefix": "**",
-            "destination": "quay",
-            "stripPrefix": false,
             "tags": { "regex": ".*" },
             "platforms": [
               { "os": "linux", "arch": "arm64" },

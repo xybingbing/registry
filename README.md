@@ -98,10 +98,93 @@ docker run -d \
 
 - 搜索扩展和 Web UI。
 - Docker Registry 兼容模式。
-- Docker Hub、Quay、GHCR 等上游的按需同步。
+- Docker Hub、Quay、GHCR、GCR 和 Kubernetes Registry 的按需同步。
 - `amd64` 和 `arm64` 平台过滤。
 
 部署前请根据实际环境检查 [config.json](config.json) 中的同步源、超时、日志级别和存储目录。
+
+## 按需同步
+
+按需同步将本仓库作为上游镜像仓库的本地缓存使用。请求的镜像在本地不存在时，zot 根据请求域名选择上游、下载镜像并写入 `/var/lib/registry`，然后将镜像返回给 Docker 客户端。后续拉取同一个仓库和标签时会直接使用本地内容，不再重复下载上游镜像。
+
+当前 `config.json` 配置了以下地址：
+
+| 上游 | 上游镜像示例 | 本地拉取命令 |
+| --- | --- | --- |
+| Docker Hub | `docker.io/library/alpine:3.20` | `docker pull localhost:5000/library/alpine:3.20` |
+| Quay | `quay.io/prometheus/busybox:latest` | `docker pull quay.localhost:5000/prometheus/busybox:latest` |
+| GHCR | `ghcr.io/xybingbing/registry:latest` | `docker pull ghcr.localhost:5000/xybingbing/registry:latest` |
+| GCR | `gcr.io/distroless/static-debian12:latest` | `docker pull gcr.localhost:5000/distroless/static-debian12:latest` |
+| Kubernetes Registry | `registry.k8s.io/pause:3.10` | `docker pull k8s.localhost:5000/pause:3.10` |
+
+Docker Hub 是默认上游，因此直接使用 `localhost:5000`。其他上游通过 `hostPrefix` 选择，例如请求 `k8s.localhost:5000` 时使用 `hostPrefix: "k8s"` 对应的 `registry.k8s.io`。
+
+`hostPrefix` 属于域名，不属于镜像路径。拉取 Kubernetes 的 `pause` 镜像时应使用：
+
+```bash
+docker pull k8s.localhost:5000/pause:3.10
+```
+
+不要写成：
+
+```text
+localhost:5000/k8s/pause:3.10
+```
+
+### 同步过程
+
+首次拉取一个尚未缓存的镜像时：
+
+1. Docker 请求本地 zot 仓库。
+2. zot 从请求域名的第一个标签取得 `hostPrefix`，例如 `quay.localhost` 对应 `quay`。
+3. zot 在启用了 `onDemand` 的同步服务中选择匹配的上游。
+4. zot 拉取符合 `content` 规则和平台过滤条件的清单与 Blob。
+5. 同步内容写入本地存储，原始拉取请求随后正常返回。
+
+当前配置只同步以下平台：
+
+```text
+linux/amd64
+linux/arm64
+```
+
+即使本机只使用其中一个架构，首次同步也会缓存上游实际提供的这两个平台。Quay、GHCR、GCR 和 Kubernetes Registry 配置的单次同步超时为 10 分钟；失败时最多重试 3 次，重试间隔为 5 分钟。
+
+可以实时查看同步日志：
+
+```bash
+docker logs -f registry
+```
+
+成功同步后查看本地仓库目录和标签：
+
+```bash
+curl http://localhost:5000/v2/_catalog
+curl http://localhost:5000/v2/prometheus/busybox/tags/list
+```
+
+再次执行相同的 `docker pull`，输出应包含 `Image is up to date`，日志中也不会再次出现该镜像的上游同步过程。
+
+### 生产环境域名
+
+`*.localhost` 适合本地测试。生产环境假设仓库入口为 `registry.example.com`，需要为各同步源配置可解析到同一 zot 服务的域名：
+
+```text
+quay.registry.example.com
+ghcr.registry.example.com
+gcr.registry.example.com
+k8s.registry.example.com
+```
+
+例如生产环境拉取 Kubernetes 镜像：
+
+```bash
+docker pull k8s.registry.example.com/pause:3.10
+```
+
+DNS、TLS 证书和反向代理必须覆盖这些域名。反向代理需要保留客户端原始 `Host` 请求头，否则 zot 无法识别 `hostPrefix`。使用 HTTP 或证书不受信任时，Docker daemon 还需要配置 insecure registry；生产环境建议始终使用可信 TLS 证书。
+
+按需同步先检查本地仓库，再在缓存未命中时选择上游。不同上游如果使用完全相同的仓库名和标签，会命中同一份本地缓存，而不会按域名分别保存。需要严格隔离同名镜像时，应为对应同步规则配置不同的 `destination`，并在本地镜像路径中使用该目标前缀。
 
 ## 多架构构建
 
