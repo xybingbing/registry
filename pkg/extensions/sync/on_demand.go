@@ -14,8 +14,9 @@ import (
 )
 
 type request struct {
-	repo      string
-	reference string
+	hostPrefix string
+	repo       string
+	reference  string
 	// used for background retries, at most one background retry per service
 	serviceID    int
 	isBackground bool
@@ -43,9 +44,14 @@ func (onDemand *BaseOnDemand) Add(service Service) {
 }
 
 func (onDemand *BaseOnDemand) SyncImage(ctx context.Context, repo, reference string) error {
+	return onDemand.SyncImageForHostPrefix(ctx, "", repo, reference)
+}
+
+func (onDemand *BaseOnDemand) SyncImageForHostPrefix(ctx context.Context, hostPrefix, repo, reference string) error {
 	req := request{
-		repo:      repo,
-		reference: reference,
+		hostPrefix: hostPrefix,
+		repo:       repo,
+		reference:  reference,
 	}
 
 	syncResult := make(chan error)
@@ -64,7 +70,7 @@ func (onDemand *BaseOnDemand) SyncImage(ctx context.Context, repo, reference str
 
 	defer onDemand.requestStore.Delete(req)
 
-	go onDemand.syncImage(ctx, repo, reference, syncResult)
+	go onDemand.syncImage(ctx, hostPrefix, repo, reference, syncResult)
 
 	err := <-syncResult
 
@@ -74,9 +80,16 @@ func (onDemand *BaseOnDemand) SyncImage(ctx context.Context, repo, reference str
 func (onDemand *BaseOnDemand) SyncReferrers(ctx context.Context, repo string,
 	subjectDigestStr string, referenceTypes []string,
 ) error {
+	return onDemand.SyncReferrersForHostPrefix(ctx, "", repo, subjectDigestStr, referenceTypes)
+}
+
+func (onDemand *BaseOnDemand) SyncReferrersForHostPrefix(ctx context.Context, hostPrefix, repo string,
+	subjectDigestStr string, referenceTypes []string,
+) error {
 	req := request{
-		repo:      repo,
-		reference: subjectDigestStr,
+		hostPrefix: hostPrefix,
+		repo:       repo,
+		reference:  subjectDigestStr,
 	}
 
 	syncResult := make(chan error)
@@ -95,24 +108,47 @@ func (onDemand *BaseOnDemand) SyncReferrers(ctx context.Context, repo string,
 
 	defer onDemand.requestStore.Delete(req)
 
-	go onDemand.syncReferrers(ctx, repo, subjectDigestStr, referenceTypes, syncResult)
+	go onDemand.syncReferrers(ctx, hostPrefix, repo, subjectDigestStr, referenceTypes, syncResult)
 
 	err := <-syncResult
 
 	return err
 }
 
-func (onDemand *BaseOnDemand) syncReferrers(ctx context.Context, repo, subjectDigestStr string,
+type hostPrefixMatcher interface {
+	MatchesHostPrefix(hostPrefix string) bool
+}
+
+func serviceMatchesHostPrefix(service Service, hostPrefix string) bool {
+	matcher, ok := service.(hostPrefixMatcher)
+	if !ok {
+		return hostPrefix == ""
+	}
+
+	return matcher.MatchesHostPrefix(hostPrefix)
+}
+
+func (onDemand *BaseOnDemand) syncReferrers(ctx context.Context, hostPrefix, repo, subjectDigestStr string,
 	referenceTypes []string, syncResult chan error,
 ) {
 	defer close(syncResult)
 
 	var err error
+	effectiveHostPrefix := hostPrefix
+
+retry:
+	attemptedService := false
 
 	for serviceID, service := range onDemand.services {
+		if !serviceMatchesHostPrefix(service, effectiveHostPrefix) {
+			continue
+		}
+
+		attemptedService = true
 		timeout := service.GetSyncTimeout()
 
 		onDemand.log.Debug().
+			Str("hostPrefix", effectiveHostPrefix).
 			Str("repo", repo).
 			Str("reference", subjectDigestStr).
 			Int("serviceID", serviceID).
@@ -137,6 +173,7 @@ func (onDemand *BaseOnDemand) syncReferrers(ctx context.Context, repo, subjectDi
 			}
 
 			req := request{
+				hostPrefix:   effectiveHostPrefix,
 				repo:         repo,
 				reference:    subjectDigestStr,
 				serviceID:    serviceID,
@@ -179,18 +216,37 @@ func (onDemand *BaseOnDemand) syncReferrers(ctx context.Context, repo, subjectDi
 		}
 	}
 
+	if !attemptedService && effectiveHostPrefix != "" {
+		effectiveHostPrefix = ""
+		goto retry
+	}
+
+	if !attemptedService {
+		err = zerr.ErrSyncImageFilteredOut
+	}
+
 	syncResult <- err
 }
 
-func (onDemand *BaseOnDemand) syncImage(ctx context.Context, repo, reference string, syncResult chan error) {
+func (onDemand *BaseOnDemand) syncImage(ctx context.Context, hostPrefix, repo, reference string, syncResult chan error) {
 	defer close(syncResult)
 
 	var err error
+	effectiveHostPrefix := hostPrefix
+
+retry:
+	attemptedService := false
 
 	for serviceID, service := range onDemand.services {
+		if !serviceMatchesHostPrefix(service, effectiveHostPrefix) {
+			continue
+		}
+
+		attemptedService = true
 		timeout := service.GetSyncTimeout()
 
 		onDemand.log.Debug().
+			Str("hostPrefix", effectiveHostPrefix).
 			Str("repo", repo).
 			Str("reference", reference).
 			Int("serviceID", serviceID).
@@ -215,6 +271,7 @@ func (onDemand *BaseOnDemand) syncImage(ctx context.Context, repo, reference str
 			}
 
 			req := request{
+				hostPrefix:   effectiveHostPrefix,
 				repo:         repo,
 				reference:    reference,
 				serviceID:    serviceID,
@@ -255,6 +312,15 @@ func (onDemand *BaseOnDemand) syncImage(ctx context.Context, repo, reference str
 		} else {
 			break
 		}
+	}
+
+	if !attemptedService && effectiveHostPrefix != "" {
+		effectiveHostPrefix = ""
+		goto retry
+	}
+
+	if !attemptedService {
+		err = zerr.ErrSyncImageFilteredOut
 	}
 
 	syncResult <- err

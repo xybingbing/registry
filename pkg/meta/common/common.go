@@ -259,15 +259,35 @@ func AddImageMetaToRepoMeta(repoMeta *proto_go.RepoMeta, repoBlobs *proto_go.Rep
 
 	imageBlobInfo := repoBlobs.Blobs[imageMeta.Digest.String()]
 
-	repoMeta.LastUpdatedImage = mConvert.GetProtoEarlierUpdatedImage(repoMeta.LastUpdatedImage,
-		&proto_go.RepoLastUpdatedImage{
-			LastUpdated: imageBlobInfo.LastUpdated,
-			MediaType:   imageMeta.MediaType,
-			Digest:      imageMeta.Digest.String(),
-			Tag:         reference,
-		})
+	if imageBlobInfo != nil {
+		repoMeta.LastUpdatedImage = recalculateLastUpdatedImage(repoMeta, repoBlobs)
+	}
 
 	return repoMeta, repoBlobs
+}
+
+func recalculateLastUpdatedImage(repoMeta *proto_go.RepoMeta, repoBlobs *proto_go.RepoBlobs) *proto_go.RepoLastUpdatedImage {
+	var updatedLastImage *proto_go.RepoLastUpdatedImage
+
+	for tag, descriptor := range repoMeta.Tags {
+		if descriptor.Digest == "" {
+			continue
+		}
+
+		descriptorBlobInfo := repoBlobs.Blobs[descriptor.Digest]
+		if descriptorBlobInfo == nil {
+			continue
+		}
+
+		updatedLastImage = mConvert.GetProtoEarlierUpdatedImage(updatedLastImage, &proto_go.RepoLastUpdatedImage{
+			LastUpdated: descriptorBlobInfo.LastUpdated,
+			MediaType:   descriptor.MediaType,
+			Digest:      descriptor.Digest,
+			Tag:         tag,
+		})
+	}
+
+	return updatedLastImage
 }
 
 func RemoveImageFromRepoMeta(repoMeta *proto_go.RepoMeta, repoBlobs *proto_go.RepoBlobs, ref string,

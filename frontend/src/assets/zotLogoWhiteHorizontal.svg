@@ -1,0 +1,29 @@
+<svg width="200" height="80" viewBox="0 0 200 80" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <!-- Icon -->
+  <g transform="translate(10, 5)">
+    <path d="M35 3 L65 20 L65 50 L35 67 L5 50 L5 20 Z" fill="none" stroke="#FFFFFF" stroke-width="2" opacity="0.9"/>
+    <path d="M35 8 L60 22 L60 48 L35 62 L10 48 L10 22 Z" fill="none" stroke="#FFFFFF" stroke-width="1.2" opacity="0.4"/>
+    <!-- Top cube -->
+    <path d="M35 15 L52 25 L52 42 L35 52 L18 42 L18 25 Z" fill="#FFFFFF" opacity="0.95"/>
+    <path d="M35 15 L52 25 L35 35 L18 25 Z" fill="#FFFFFF"/>
+    <path d="M18 25 L35 35 L35 52 L18 42 Z" fill="#FFFFFF" opacity="0.7"/>
+    <path d="M35 35 L52 25 L52 42 L35 52 Z" fill="#FFFFFF" opacity="0.5"/>
+    <!-- Bottom left cube -->
+    <path d="M15 38 L30 46 L30 60 L15 68 L0 60 L0 46 Z" fill="#FFFFFF" opacity="0.85"/>
+    <path d="M15 38 L30 46 L15 54 L0 46 Z" fill="#FFFFFF"/>
+    <path d="M0 46 L15 54 L15 68 L0 60 Z" fill="#FFFFFF" opacity="0.7"/>
+    <path d="M15 54 L30 46 L30 60 L15 68 Z" fill="#FFFFFF" opacity="0.5"/>
+    <!-- Bottom center cube -->
+    <path d="M35 42 L50 50 L50 64 L35 72 L20 64 L20 50 Z" fill="#FFFFFF" opacity="0.9"/>
+    <path d="M35 42 L50 50 L35 58 L20 50 Z" fill="#FFFFFF"/>
+    <path d="M20 50 L35 58 L35 72 L20 64 Z" fill="#FFFFFF" opacity="0.7"/>
+    <path d="M35 58 L50 50 L50 64 L35 72 Z" fill="#FFFFFF" opacity="0.5"/>
+    <!-- Bottom right cube -->
+    <path d="M55 38 L70 46 L70 60 L55 68 L40 60 L40 46 Z" fill="#FFFFFF" opacity="0.85"/>
+    <path d="M55 38 L70 46 L55 54 L40 46 Z" fill="#FFFFFF"/>
+    <path d="M40 46 L55 54 L55 68 L40 60 Z" fill="#FFFFFF" opacity="0.7"/>
+    <path d="M55 54 L70 46 L70 60 L55 68 Z" fill="#FFFFFF" opacity="0.5"/>
+  </g>
+  <!-- zot text -->
+  <text x="90" y="52" fill="#FFFFFF" font-family="Roboto, sans-serif" font-size="32" font-weight="700" letter-spacing="1">zot</text>
+</svg>

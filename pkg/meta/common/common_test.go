@@ -612,5 +612,63 @@ func TestUtils(t *testing.T) {
 			So(resultBlobs.Blobs[configDigest.String()], ShouldNotBeNil)
 			So(resultBlobs.Blobs[layerDigest.String()], ShouldNotBeNil)
 		})
+
+		Convey("should recalculate LastUpdatedImage when an existing tag moves to a new digest", func() {
+			oldDigest := godigest.FromString("old helm chart")
+			newDigest := godigest.FromString("new helm chart")
+			configDigest := godigest.FromString("new config")
+			oldTime := time.Date(2026, 7, 15, 8, 21, 0, 0, time.UTC)
+			newTime := time.Date(2026, 7, 15, 8, 10, 0, 0, time.UTC)
+
+			repoMeta := &proto_go.RepoMeta{
+				Name: "helm-charts/zot",
+				Tags: map[string]*proto_go.TagDescriptor{
+					"0.1.122-k3s": {
+						MediaType: ispec.MediaTypeImageManifest,
+						Digest:    newDigest.String(),
+					},
+				},
+				LastUpdatedImage: &proto_go.RepoLastUpdatedImage{
+					LastUpdated: timestamppb.New(oldTime),
+					MediaType:   ispec.MediaTypeImageManifest,
+					Digest:      oldDigest.String(),
+					Tag:         "0.1.122-k3s",
+				},
+			}
+			repoBlobs := &proto_go.RepoBlobs{
+				Blobs: map[string]*proto_go.BlobInfo{
+					oldDigest.String(): {
+						Size:        1000,
+						LastUpdated: timestamppb.New(oldTime),
+					},
+				},
+			}
+			imageMeta := mTypes.ImageMeta{
+				MediaType: ispec.MediaTypeImageManifest,
+				Digest:    newDigest,
+				Size:      1000,
+				Manifests: []mTypes.ManifestMeta{
+					{
+						Digest: newDigest,
+						Size:   1000,
+						Manifest: ispec.Manifest{
+							Config: ispec.Descriptor{
+								Digest: configDigest,
+								Size:   200,
+							},
+						},
+						Config: ispec.Image{
+							Created: &newTime,
+						},
+					},
+				},
+			}
+
+			resultMeta, _ := common.AddImageMetaToRepoMeta(repoMeta, repoBlobs, "0.1.122-k3s", imageMeta)
+
+			So(resultMeta.LastUpdatedImage, ShouldNotBeNil)
+			So(resultMeta.LastUpdatedImage.Digest, ShouldEqual, newDigest.String())
+			So(resultMeta.LastUpdatedImage.Tag, ShouldEqual, "0.1.122-k3s")
+		})
 	})
 }

@@ -15,6 +15,7 @@ import (
 	"io"
 	"mime"
 	"mime/multipart"
+	"net"
 	"net/http"
 	"net/textproto"
 	"net/url"
@@ -475,7 +476,8 @@ func (rh *RouteHandler) CheckManifest(response http.ResponseWriter, request *htt
 		return
 	}
 
-	content, digest, mediaType, err := getImageManifest(request.Context(), rh, imgStore, name, reference)
+	content, digest, mediaType, err := getImageManifest(request.Context(), rh, imgStore, name, reference,
+		requestHostPrefix(request))
 	if err != nil {
 		details := zerr.GetDetails(err)
 		details["reference"] = reference
@@ -552,7 +554,8 @@ func (rh *RouteHandler) GetManifest(response http.ResponseWriter, request *http.
 		return
 	}
 
-	content, digest, mediaType, err := getImageManifest(request.Context(), rh, imgStore, name, reference)
+	content, digest, mediaType, err := getImageManifest(request.Context(), rh, imgStore, name, reference,
+		requestHostPrefix(request))
 	if err != nil {
 		details := zerr.GetDetails(err)
 		if errors.Is(err, zerr.ErrRepoNotFound) { //nolint:gocritic // errorslint conflicts with gocritic:IfElseChain
@@ -599,13 +602,15 @@ type ImageIndex struct {
 
 func getReferrers(ctx context.Context, routeHandler *RouteHandler,
 	imgStore storageTypes.ImageStore, name string, digest godigest.Digest,
-	artifactTypes []string,
+	artifactTypes []string, hostPrefix string,
 ) (ispec.Index, error) {
 	if isSyncOnDemandEnabled(routeHandler.c) {
 		routeHandler.c.Log.Info().Str("repository", name).Str("reference", digest.String()).
 			Msg("trying to get updated referrers by syncing on demand")
 
-		if errSync := routeHandler.c.SyncOnDemand.SyncReferrers(ctx, name, digest.String(), artifactTypes); errSync != nil {
+		if errSync := routeHandler.c.SyncOnDemand.SyncReferrersForHostPrefix(ctx, hostPrefix, name, digest.String(),
+			artifactTypes,
+		); errSync != nil {
 			routeHandler.c.Log.Err(errSync).Str("repository", name).Str("reference", digest.String()).
 				Msg("failed to sync image referrers")
 		}
@@ -658,7 +663,8 @@ func (rh *RouteHandler) GetReferrers(response http.ResponseWriter, request *http
 
 	imgStore := rh.getImageStore(name)
 
-	referrers, err := getReferrers(request.Context(), rh, imgStore, name, digest, artifactTypes)
+	referrers, err := getReferrers(request.Context(), rh, imgStore, name, digest, artifactTypes,
+		requestHostPrefix(request))
 	if err != nil {
 		if errors.Is(err, zerr.ErrManifestNotFound) {
 			rh.c.Log.Error().Err(err).Str("name", name).Str("digest", digest.String()).
@@ -2743,25 +2749,45 @@ func (rh *RouteHandler) getImageStore(name string) storageTypes.ImageStore {
 }
 
 // will sync on demand if an image is not found, in case sync extensions is enabled.
+func requestHostPrefix(request *http.Request) string {
+	host := request.Host
+	if hostname, _, err := net.SplitHostPort(host); err == nil {
+		host = hostname
+	}
+
+	host = strings.Trim(strings.ToLower(host), ".")
+	if host == "" || strings.Contains(host, ":") {
+		return ""
+	}
+
+	firstLabel, _, hasDot := strings.Cut(host, ".")
+	if !hasDot {
+		return ""
+	}
+
+	if firstLabel == "zot" {
+		return ""
+	}
+
+	return firstLabel
+}
+
 func getImageManifest(ctx context.Context, routeHandler *RouteHandler, imgStore storageTypes.ImageStore, name,
-	reference string,
+	reference, hostPrefix string,
 ) ([]byte, godigest.Digest, string, error) {
 	syncEnabled := isSyncOnDemandEnabled(routeHandler.c)
 
-	_, digestErr := godigest.Parse(reference)
-	if digestErr == nil {
-		// if it's a digest then return local cached image, if not found and sync enabled, then try to sync
-		content, digest, mediaType, err := imgStore.GetImageManifest(name, reference)
-		if err == nil || !syncEnabled {
-			return content, digest, mediaType, err
-		}
+	// Prefer the local image for both tag and digest references. On-demand sync is only a cache miss fallback.
+	content, digest, mediaType, err := imgStore.GetImageManifest(name, reference)
+	if err == nil || !syncEnabled {
+		return content, digest, mediaType, err
 	}
 
 	if syncEnabled {
 		routeHandler.c.Log.Info().Str("repository", name).Str("reference", reference).
 			Msg("trying to get updated image by syncing on demand")
 
-		if errSync := routeHandler.c.SyncOnDemand.SyncImage(ctx, name, reference); errSync != nil {
+		if errSync := routeHandler.c.SyncOnDemand.SyncImageForHostPrefix(ctx, hostPrefix, name, reference); errSync != nil {
 			routeHandler.c.Log.Err(errSync).Str("repository", name).Str("reference", reference).
 				Msg("failed to sync image")
 		}

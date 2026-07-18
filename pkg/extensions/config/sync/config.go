@@ -24,6 +24,7 @@ type Config struct {
 
 type RegistryConfig struct {
 	URLs                  []string
+	HostPrefix            string `mapstructure:"hostPrefix,omitempty"`
 	PollInterval          time.Duration
 	Content               []Content
 	TLSVerify             *bool

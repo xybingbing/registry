@@ -1,0 +1,25 @@
+<svg width="36" height="36" viewBox="0 0 100 100" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <!-- Outer hexagonal ring -->
+  <path d="M50 5 L90 27.5 L90 72.5 L50 95 L10 72.5 L10 27.5 Z" fill="none" stroke="#0288D1" stroke-width="3" opacity="0.9"/>
+  <path d="M50 12 L83 31 L83 69 L50 88 L17 69 L17 31 Z" fill="none" stroke="#4FC3F7" stroke-width="2" opacity="0.4"/>
+  <!-- Top cube -->
+  <path d="M50 25 L68 35 L68 55 L50 65 L32 55 L32 35 Z" fill="#4FC3F7" opacity="0.95"/>
+  <path d="M50 25 L68 35 L50 45 L32 35 Z" fill="#81D4FA"/>
+  <path d="M32 35 L50 45 L50 65 L32 55 Z" fill="#0288D1"/>
+  <path d="M50 45 L68 35 L68 55 L50 65 Z" fill="#01579B"/>
+  <!-- Bottom left cube -->
+  <path d="M28 50 L42 58 L42 72 L28 80 L14 72 L14 58 Z" fill="#4FC3F7" opacity="0.85"/>
+  <path d="M28 50 L42 58 L28 66 L14 58 Z" fill="#81D4FA"/>
+  <path d="M14 58 L28 66 L28 80 L14 72 Z" fill="#0288D1"/>
+  <path d="M28 66 L42 58 L42 72 L28 80 Z" fill="#01579B"/>
+  <!-- Bottom center cube -->
+  <path d="M50 55 L64 63 L64 77 L50 85 L36 77 L36 63 Z" fill="#4FC3F7" opacity="0.9"/>
+  <path d="M50 55 L64 63 L50 71 L36 63 Z" fill="#81D4FA"/>
+  <path d="M36 63 L50 71 L50 85 L36 77 Z" fill="#0288D1"/>
+  <path d="M50 71 L64 63 L64 77 L50 85 Z" fill="#01579B"/>
+  <!-- Bottom right cube -->
+  <path d="M72 50 L86 58 L86 72 L72 80 L58 72 L58 58 Z" fill="#4FC3F7" opacity="0.85"/>
+  <path d="M72 50 L86 58 L72 66 L58 58 Z" fill="#81D4FA"/>
+  <path d="M58 58 L72 66 L72 80 L58 72 Z" fill="#0288D1"/>
+  <path d="M72 66 L86 58 L86 72 L72 80 Z" fill="#01579B"/>
+</svg>

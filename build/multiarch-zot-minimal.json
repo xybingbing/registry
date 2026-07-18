@@ -1,9 +1,0 @@
-{
-    "target_repo": "zot-minimal",
-    "source_repos": [
-        "zot-minimal-linux-amd64",
-        "zot-minimal-linux-arm64",
-        "zot-minimal-freebsd-amd64",
-        "zot-minimal-freebsd-arm64"
-    ]
-}

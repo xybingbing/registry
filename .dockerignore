@@ -1,0 +1,13 @@
+.git
+.github
+.idea
+
+bin
+build
+frontend/build
+frontend/node_modules
+pkg/extensions/build
+
+*.log
+coverage*.txt
+zot.PID

@@ -38,6 +38,92 @@ import (
 	"zotregistry.dev/zot/v2/pkg/test/mocks"
 )
 
+type testOnDemandService struct {
+	hostPrefix string
+	imageCalls int
+	refCalls   int
+}
+
+func (service *testOnDemandService) GetNextRepo(lastRepo string) (string, error) {
+	return "", nil
+}
+
+func (service *testOnDemandService) SyncRepo(ctx context.Context, repo string) error {
+	return nil
+}
+
+func (service *testOnDemandService) SyncImage(ctx context.Context, repo, reference string) error {
+	service.imageCalls++
+
+	return nil
+}
+
+func (service *testOnDemandService) SyncReferrers(ctx context.Context, repo string,
+	subjectDigestStr string, referenceTypes []string,
+) error {
+	service.refCalls++
+
+	return nil
+}
+
+func (service *testOnDemandService) ResetCatalog() {}
+
+func (service *testOnDemandService) CanRetryOnError() bool {
+	return false
+}
+
+func (service *testOnDemandService) GetSyncTimeout() time.Duration {
+	return time.Second
+}
+
+func (service *testOnDemandService) MatchesHostPrefix(hostPrefix string) bool {
+	return strings.EqualFold(service.hostPrefix, hostPrefix)
+}
+
+func TestOnDemandHostPrefix(t *testing.T) {
+	Convey("empty host prefix selects the default sync service", t, func() {
+		defaultService := &testOnDemandService{}
+		ghcrService := &testOnDemandService{hostPrefix: "ghcr"}
+
+		onDemand := NewOnDemand(log.NewTestLogger())
+		onDemand.Add(defaultService)
+		onDemand.Add(ghcrService)
+
+		err := onDemand.SyncImageForHostPrefix(context.Background(), "", "library/alpine", "latest")
+		So(err, ShouldBeNil)
+		So(defaultService.imageCalls, ShouldEqual, 1)
+		So(ghcrService.imageCalls, ShouldEqual, 0)
+	})
+
+	Convey("host prefix selects the matching sync service without changing repo name", t, func() {
+		defaultService := &testOnDemandService{}
+		ghcrService := &testOnDemandService{hostPrefix: "ghcr"}
+
+		onDemand := NewOnDemand(log.NewTestLogger())
+		onDemand.Add(defaultService)
+		onDemand.Add(ghcrService)
+
+		err := onDemand.SyncImageForHostPrefix(context.Background(), "ghcr", "library/alpine", "latest")
+		So(err, ShouldBeNil)
+		So(defaultService.imageCalls, ShouldEqual, 0)
+		So(ghcrService.imageCalls, ShouldEqual, 1)
+	})
+
+	Convey("unknown host prefix falls back to legacy unprefixed services", t, func() {
+		dockerService := &testOnDemandService{hostPrefix: "docker"}
+		legacyService := &testOnDemandService{}
+
+		onDemand := NewOnDemand(log.NewTestLogger())
+		onDemand.Add(dockerService)
+		onDemand.Add(legacyService)
+
+		err := onDemand.SyncImageForHostPrefix(context.Background(), "unknown", "dxflrs/garage", "v2.3.0")
+		So(err, ShouldBeNil)
+		So(dockerService.imageCalls, ShouldEqual, 0)
+		So(legacyService.imageCalls, ShouldEqual, 1)
+	})
+}
+
 func TestService(t *testing.T) {
 	Convey("trigger fetch tags error", t, func() {
 		conf := syncconf.RegistryConfig{

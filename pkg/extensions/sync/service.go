@@ -219,6 +219,10 @@ func (service *BaseService) GetSyncTimeout() time.Duration {
 	return service.config.SyncTimeout
 }
 
+func (service *BaseService) MatchesHostPrefix(hostPrefix string) bool {
+	return strings.EqualFold(service.config.HostPrefix, hostPrefix)
+}
+
 func (service *BaseService) getNextRepoFromCatalog(lastRepo string) string {
 	var found bool
 
