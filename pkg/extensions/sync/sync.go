@@ -90,9 +90,9 @@ type Remote interface {
 type Destination interface {
 	Registry
 	// Check if descriptors are already synced
-	CanSkipImage(repo string, tag string, digest godigest.Digest) (bool, error)
+	CanSkipImage(repo string, tag string, expectedLocalDigest, upstreamDigest godigest.Digest) (bool, error)
 	// CommitAll moves a synced repo and all its manifests from temporary oci layout to ImageStore
-	CommitAll(repo string, imageReference ref.Ref) error
+	CommitAll(repo string, imageReference ref.Ref, upstreamDigest godigest.Digest) error
 	// Removes image reference, used when copy.Image() errors out
 	CleanupImage(imageReference ref.Ref, repo string) error
 }

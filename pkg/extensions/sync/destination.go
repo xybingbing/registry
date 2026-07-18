@@ -37,6 +37,8 @@ type DestinationRegistry struct {
 	log             log.Logger
 }
 
+const syncSourceDigestAnnotation = "dev.zotregistry.sync.source.digest"
+
 func NewDestinationRegistry(
 	storeController storage.StoreController, // local store controller
 	tempStoreController storage.StoreController, // temp store controller
@@ -54,11 +56,13 @@ func NewDestinationRegistry(
 }
 
 // CanSkipImage checks if image is already synced.
-func (registry *DestinationRegistry) CanSkipImage(repo, tag string, digest godigest.Digest) (bool, error) {
+func (registry *DestinationRegistry) CanSkipImage(repo, tag string,
+	expectedLocalDigest, upstreamDigest godigest.Digest,
+) (bool, error) {
 	// check image already synced
 	imageStore := registry.storeController.GetImageStore(repo)
 
-	_, localImageManifestDigest, _, err := imageStore.GetImageManifest(repo, tag)
+	manifestContent, localImageManifestDigest, mediaType, err := imageStore.GetImageManifest(repo, tag)
 	if err != nil {
 		if errors.Is(err, zerr.ErrRepoNotFound) || errors.Is(err, zerr.ErrManifestNotFound) {
 			return false, nil
@@ -70,10 +74,39 @@ func (registry *DestinationRegistry) CanSkipImage(repo, tag string, digest godig
 		return false, err
 	}
 
-	if localImageManifestDigest != digest {
+	if upstreamDigest == "" {
+		upstreamDigest = expectedLocalDigest
+	}
+
+	if mediaType == ispec.MediaTypeImageIndex || mediaType == mediatype.Docker2ManifestList {
+		var indexManifest ispec.Index
+		if err := json.Unmarshal(manifestContent, &indexManifest); err != nil {
+			return false, fmt.Errorf("failed to read local image index sync metadata: %w", err)
+		}
+
+		if syncedUpstreamDigest := indexManifest.Annotations[syncSourceDigestAnnotation]; syncedUpstreamDigest != "" {
+			if syncedUpstreamDigest == upstreamDigest.String() {
+				registry.log.Info().Str("repo", repo).Str("reference", tag).
+					Str("upstreamDigest", syncedUpstreamDigest).
+					Msg("upstream source digest unchanged, skipping image sync")
+
+				return true, nil
+			}
+
+			registry.log.Info().Str("repo", repo).Str("reference", tag).
+				Str("previousUpstreamDigest", syncedUpstreamDigest).
+				Str("upstreamDigest", upstreamDigest.String()).
+				Msg("upstream source digest changed, syncing again")
+
+			return false, nil
+		}
+	}
+
+	// Images synced before source digest tracking was added use the previous comparison once.
+	if localImageManifestDigest != expectedLocalDigest {
 		registry.log.Info().Str("repo", repo).Str("reference", tag).
 			Str("localDigest", localImageManifestDigest.String()).
-			Str("remoteDigest", digest.String()).
+			Str("expectedLocalDigest", expectedLocalDigest.String()).
 			Msg("remote image digest changed, syncing again")
 
 		return false, nil
@@ -87,7 +120,9 @@ func (registry *DestinationRegistry) GetImageReference(repo, reference string) (
 }
 
 // CommitAll finalizes a syncing image.
-func (registry *DestinationRegistry) CommitAll(repo string, imageReference ref.Ref) error {
+func (registry *DestinationRegistry) CommitAll(repo string, imageReference ref.Ref,
+	upstreamDigest godigest.Digest,
+) error {
 	tempImageStore := getImageStoreFromImageReference(repo, imageReference, registry.log)
 
 	defer os.RemoveAll(tempImageStore.RootDir())
@@ -128,11 +163,14 @@ func (registry *DestinationRegistry) CommitAll(repo string, imageReference ref.R
 	}
 
 	seen := &[]godigest.Digest{}
-
 	for _, desc := range index.Manifests {
 		reference := GetDescriptorReference(desc)
+		manifestSourceDigest := godigest.Digest("")
+		if imageReference.Tag != "" && reference == imageReference.Tag {
+			manifestSourceDigest = upstreamDigest
+		}
 
-		if err := registry.copyManifest(repo, desc, reference, tempImageStore, seen); err != nil {
+		if err := registry.copyManifest(repo, desc, reference, tempImageStore, seen, manifestSourceDigest); err != nil {
 			if errors.Is(err, zerr.ErrImageLintAnnotations) {
 				registry.log.Error().Str("errorType", common.TypeOf(err)).
 					Err(err).Msg("failed to upload manifest because of missing annotations")
@@ -164,6 +202,7 @@ func (registry *DestinationRegistry) CleanupImage(imageReference ref.Ref, repo s
 
 func (registry *DestinationRegistry) copyManifest(repo string, desc ispec.Descriptor,
 	reference string, tempImageStore storageTypes.ImageStore, seen *[]godigest.Digest,
+	sourceDigest godigest.Digest,
 ) error {
 	var err error
 
@@ -276,7 +315,7 @@ func (registry *DestinationRegistry) copyManifest(repo string, desc ispec.Descri
 			manifest.Data = manifestBuf
 
 			if err := registry.copyManifest(repo, manifest, reference,
-				tempImageStore, seen); err != nil {
+				tempImageStore, seen, ""); err != nil {
 				if errors.Is(err, zerr.ErrImageLintAnnotations) {
 					registry.log.Error().Str("errorType", common.TypeOf(err)).
 						Err(err).Msg("failed to upload manifest because of missing annotations")
@@ -308,9 +347,25 @@ func (registry *DestinationRegistry) copyManifest(repo string, desc ispec.Descri
 
 			return err
 		}
+		if sourceDigest != "" && godigest.FromBytes(filteredContent) != sourceDigest {
+			if indexManifest.Annotations == nil {
+				indexManifest.Annotations = map[string]string{}
+			}
+			indexManifest.Annotations[syncSourceDigestAnnotation] = sourceDigest.String()
+
+			filteredContent, err = json.Marshal(indexManifest)
+			if err != nil {
+				registry.log.Error().Str("errorType", common.TypeOf(err)).Err(err).
+					Msg("failed to marshal image index with upstream source digest")
+
+				return err
+			}
+		}
 		manifestContent = filteredContent
 
-		_, _, err = imageStore.PutImageManifest(context.Background(), repo, reference, desc.MediaType, manifestContent, nil)
+		storedDigest, _, err := imageStore.PutImageManifest(
+			context.Background(), repo, reference, desc.MediaType, manifestContent, nil,
+		)
 		if err != nil {
 			registry.log.Error().Str("errorType", common.TypeOf(err)).Str("repo", repo).Str("reference", reference).
 				Err(err).Msg("failed to upload manifest")
@@ -320,7 +375,7 @@ func (registry *DestinationRegistry) copyManifest(repo string, desc ispec.Descri
 
 		if registry.metaDB != nil {
 			err = meta.SetImageMetaFromInput(context.Background(), repo, reference, desc.MediaType,
-				desc.Digest, manifestContent, imageStore, registry.metaDB, registry.log)
+				storedDigest, manifestContent, imageStore, registry.metaDB, registry.log)
 			if err != nil {
 				return fmt.Errorf("metaDB: failed to set metadata for image '%s %s': %w", repo, reference, err)
 			}

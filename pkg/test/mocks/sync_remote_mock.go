@@ -72,8 +72,8 @@ func (remote SyncRemoteMock) GetImageReference(repo string, tag string) (ref.Ref
 type SyncDestinationMock struct {
 	// Methods required by sync Destination interface.
 	GetImageReferenceFn func(repo string, tag string) (ref.Ref, error)
-	CanSkipImageFn      func(repo string, tag string, digest digest.Digest) (bool, error)
-	CommitAllFn         func(repo string, imageReference ref.Ref) error
+	CanSkipImageFn      func(repo string, tag string, expectedLocalDigest, upstreamDigest digest.Digest) (bool, error)
+	CommitAllFn         func(repo string, imageReference ref.Ref, upstreamDigest digest.Digest) error
 	CleanupImageFn      func(imageReference ref.Ref, repo string) error
 }
 
@@ -87,17 +87,19 @@ func (dest SyncDestinationMock) GetImageReference(repo string, tag string) (ref.
 	return ref.New("mock-local/" + repo + ":" + tag)
 }
 
-func (dest SyncDestinationMock) CanSkipImage(repo string, tag string, digest digest.Digest) (bool, error) {
+func (dest SyncDestinationMock) CanSkipImage(repo string, tag string,
+	expectedLocalDigest, upstreamDigest digest.Digest,
+) (bool, error) {
 	if dest.CanSkipImageFn != nil {
-		return dest.CanSkipImageFn(repo, tag, digest)
+		return dest.CanSkipImageFn(repo, tag, expectedLocalDigest, upstreamDigest)
 	}
 
 	return false, nil
 }
 
-func (dest SyncDestinationMock) CommitAll(repo string, imageReference ref.Ref) error {
+func (dest SyncDestinationMock) CommitAll(repo string, imageReference ref.Ref, upstreamDigest digest.Digest) error {
 	if dest.CommitAllFn != nil {
-		return dest.CommitAllFn(repo, imageReference)
+		return dest.CommitAllFn(repo, imageReference, upstreamDigest)
 	}
 
 	return nil

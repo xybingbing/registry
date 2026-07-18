@@ -266,10 +266,16 @@ func TestService(t *testing.T) {
 			GetImageReferenceFn: func(repo string, tag string) (ref.Ref, error) {
 				return ref.New("local/" + repo + ":" + tag)
 			},
-			CanSkipImageFn: func(repo string, tag string, digest godigest.Digest) (bool, error) {
+			CanSkipImageFn: func(repo string, tag string,
+				expectedLocalDigest, upstreamDigest godigest.Digest,
+			) (bool, error) {
+				So(expectedLocalDigest, ShouldEqual, godigest.Digest("sha256:abc123"))
+				So(upstreamDigest, ShouldEqual, godigest.Digest("sha256:def456"))
+
 				return true, nil
 			},
-			CommitAllFn: func(repo string, imageReference ref.Ref) error {
+			CommitAllFn: func(repo string, imageReference ref.Ref, upstreamDigest godigest.Digest) error {
+				So(upstreamDigest, ShouldEqual, godigest.Digest("sha256:def456"))
 				commitAllCalled = true
 				return nil
 			},
@@ -786,7 +792,7 @@ func TestSyncLegacyCosignTagsSyncReferrers(t *testing.T) {
 			GetImageReferenceFn: func(repo, tag string) (ref.Ref, error) {
 				return ref.New("local/" + repo + "@" + tag)
 			},
-			CommitAllFn: func(repo string, imageReference ref.Ref) error {
+			CommitAllFn: func(repo string, imageReference ref.Ref, upstreamDigest godigest.Digest) error {
 				return nil
 			},
 		}
@@ -995,20 +1001,44 @@ func TestDestinationRegistry(t *testing.T) {
 		So(err, ShouldBeNil)
 
 		Convey("sync index image", func() {
-			ok, err := registry.CanSkipImage(repoName, "1.0", indexDigest)
+			ok, err := registry.CanSkipImage(repoName, "1.0", indexDigest, "")
 			So(ok, ShouldBeFalse)
 			So(err, ShouldBeNil)
 
-			err = registry.CommitAll(repoName, imageReference)
+			err = registry.CommitAll(repoName, imageReference, "")
 			So(err, ShouldBeNil)
 		})
 
+		Convey("skip a filtered index when its upstream source digest is unchanged", func() {
+			sourceDigest := godigest.FromString("complete upstream index")
+
+			err = registry.CommitAll(repoName, imageReference, sourceDigest)
+			So(err, ShouldBeNil)
+
+			storedContent, _, _, err := syncImgStore.GetImageManifest(repoName, "1.0")
+			So(err, ShouldBeNil)
+
+			var storedIndex ispec.Index
+			err = json.Unmarshal(storedContent, &storedIndex)
+			So(err, ShouldBeNil)
+			So(storedIndex.Annotations[syncSourceDigestAnnotation], ShouldEqual, sourceDigest.String())
+
+			ok, err := registry.CanSkipImage(repoName, "1.0", indexDigest, sourceDigest)
+			So(err, ShouldBeNil)
+			So(ok, ShouldBeTrue)
+
+			changedSourceDigest := godigest.FromString("updated upstream index")
+			ok, err = registry.CanSkipImage(repoName, "1.0", indexDigest, changedSourceDigest)
+			So(err, ShouldBeNil)
+			So(ok, ShouldBeFalse)
+		})
+
 		Convey("CleanupImage()", func() {
-			ok, err := registry.CanSkipImage(repoName, "1.0", indexDigest)
+			ok, err := registry.CanSkipImage(repoName, "1.0", indexDigest, "")
 			So(ok, ShouldBeFalse)
 			So(err, ShouldBeNil)
 
-			err = registry.CommitAll(repoName, imageReference)
+			err = registry.CommitAll(repoName, imageReference, "")
 			So(err, ShouldBeNil)
 
 			err = registry.CleanupImage(imageReference, repoName)
@@ -1019,7 +1049,7 @@ func TestDestinationRegistry(t *testing.T) {
 			err = os.Chmod(imgStore.BlobPath(repoName, indexDigest), 0o000)
 			So(err, ShouldBeNil)
 
-			err = registry.CommitAll(repoName, imageReference)
+			err = registry.CommitAll(repoName, imageReference, "")
 			So(err, ShouldNotBeNil)
 		})
 
@@ -1038,7 +1068,7 @@ func TestDestinationRegistry(t *testing.T) {
 			storeController := storage.StoreController{DefaultStore: syncImgStore}
 			registry := NewDestinationRegistry(storeController, storeController, nil, log)
 
-			err = registry.CommitAll(repoName, imageReference)
+			err = registry.CommitAll(repoName, imageReference, "")
 			So(err, ShouldBeNil)
 		})
 
@@ -1046,7 +1076,7 @@ func TestDestinationRegistry(t *testing.T) {
 			err = os.Chmod(imgStore.BlobPath(repoName, digest), 0o000)
 			So(err, ShouldBeNil)
 
-			err = registry.CommitAll(repoName, imageReference)
+			err = registry.CommitAll(repoName, imageReference, "")
 			So(err, ShouldNotBeNil)
 		})
 
@@ -1054,7 +1084,7 @@ func TestDestinationRegistry(t *testing.T) {
 			err = os.Chmod(imgStore.BlobPath(repoName, bdgst1), 0o000)
 			So(err, ShouldBeNil)
 
-			err = registry.CommitAll(repoName, imageReference)
+			err = registry.CommitAll(repoName, imageReference, "")
 			So(err, ShouldNotBeNil)
 		})
 
@@ -1065,7 +1095,7 @@ func TestDestinationRegistry(t *testing.T) {
 			err = os.Chmod(syncImgStore.BlobPath(repoName, indexDigest), 0o000)
 			So(err, ShouldBeNil)
 
-			err = registry.CommitAll(repoName, imageReference)
+			err = registry.CommitAll(repoName, imageReference, "")
 			So(err, ShouldNotBeNil)
 		})
 
@@ -1081,7 +1111,7 @@ func TestDestinationRegistry(t *testing.T) {
 				},
 			}, log)
 
-			err = registry.CommitAll(repoName, imageReference)
+			err = registry.CommitAll(repoName, imageReference, "")
 			So(err, ShouldNotBeNil)
 		})
 
@@ -1093,7 +1123,7 @@ func TestDestinationRegistry(t *testing.T) {
 				},
 			}, log)
 
-			err = registry.CommitAll(repoName, imageReference)
+			err = registry.CommitAll(repoName, imageReference, "")
 			So(err, ShouldNotBeNil)
 		})
 
@@ -1200,7 +1230,7 @@ func TestDestinationRegistry(t *testing.T) {
 			// Store the index manifest in the temp image store
 
 			_, _, err = tempImgStore.PutImageManifest(
-				context.Background(), repoName, indexDigest.String(), ispec.MediaTypeImageIndex, indexContent, nil)
+				context.Background(), repoName, "test-index", ispec.MediaTypeImageIndex, indexContent, nil)
 			So(err, ShouldBeNil)
 
 			// Now remove one of the child manifest blobs to trigger the error
@@ -1218,13 +1248,20 @@ func TestDestinationRegistry(t *testing.T) {
 			// Initialize the seen slice
 			seen := &[]godigest.Digest{}
 
-			// Call copyManifest directly with the index manifest - this should trigger the error path at lines 234-239
-			// when it tries to get blob content for the child manifest with the removed blob
-			err = registry.(*DestinationRegistry).copyManifest(repoName, desc, indexDigest.String(), tempImgStore, seen)
+			// Platform filtering can omit child manifests. Keep the available child and
+			// write a valid filtered index.
+			err = registry.(*DestinationRegistry).copyManifest(repoName, desc, "test-index", tempImgStore, seen, "")
 
-			// Verify the error is returned and contains the expected message
-			So(err, ShouldNotBeNil)
-			So(err.Error(), ShouldContainSubstring, "blob not found")
+			So(err, ShouldBeNil)
+
+			filteredContent, _, _, err := syncImgStore.GetImageManifest(repoName, "test-index")
+			So(err, ShouldBeNil)
+
+			var filteredIndex ispec.Index
+			err = json.Unmarshal(filteredContent, &filteredIndex)
+			So(err, ShouldBeNil)
+			So(filteredIndex.Manifests, ShouldHaveLength, 1)
+			So(filteredIndex.Manifests[0].Digest, ShouldEqual, index.Manifests[0].Digest)
 		})
 
 		Convey("push image", func() {
@@ -1297,11 +1334,11 @@ func TestDestinationRegistry(t *testing.T) {
 			So(err, ShouldBeNil)
 
 			Convey("sync image", func() {
-				ok, err := registry.CanSkipImage(repoName, "2.0", digest)
+				ok, err := registry.CanSkipImage(repoName, "2.0", digest, "")
 				So(ok, ShouldBeFalse)
 				So(err, ShouldBeNil)
 
-				err = registry.CommitAll(repoName, imageReference)
+				err = registry.CommitAll(repoName, imageReference, "")
 				So(err, ShouldBeNil)
 			})
 		})
@@ -1319,7 +1356,7 @@ func TestDestinationRegistry(t *testing.T) {
 			So(err, ShouldBeNil)
 
 			// CommitAll should return nil when directory doesn't exist (image was skipped)
-			err = registry.CommitAll("nonexistent-repo", imageReference)
+			err = registry.CommitAll("nonexistent-repo", imageReference, "")
 			So(err, ShouldBeNil)
 		})
 
@@ -1336,7 +1373,7 @@ func TestDestinationRegistry(t *testing.T) {
 			So(err, ShouldBeNil)
 
 			// CommitAll should return nil when directory is empty (image was skipped)
-			err = registry.CommitAll("empty-repo", imageReference)
+			err = registry.CommitAll("empty-repo", imageReference, "")
 			So(err, ShouldBeNil)
 		})
 
@@ -1358,7 +1395,7 @@ func TestDestinationRegistry(t *testing.T) {
 			So(err, ShouldBeNil)
 
 			// CommitAll should return an error when directory is not empty but index.json is missing
-			err = registry.CommitAll("inconsistent-repo", imageReference)
+			err = registry.CommitAll("inconsistent-repo", imageReference, "")
 			So(err, ShouldNotBeNil)
 			So(errors.Is(err, zerr.ErrRepoNotFound), ShouldBeTrue)
 		})
@@ -1382,7 +1419,7 @@ func TestDestinationRegistry(t *testing.T) {
 			So(err, ShouldBeNil)
 
 			// CommitAll should return the ReadDir error (not ErrNotExist)
-			err = registry.CommitAll("error-repo", imageReference)
+			err = registry.CommitAll("error-repo", imageReference, "")
 			So(err, ShouldNotBeNil)
 			So(errors.Is(err, os.ErrNotExist), ShouldBeFalse)
 		})

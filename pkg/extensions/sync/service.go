@@ -324,7 +324,7 @@ func (service *BaseService) syncImageOnDemand(ctx context.Context, repo, referen
 	}
 
 	service.log.Info().Str("remote", remoteURL).Str("repo", repo).Str("reference", reference).
-		Msg("sync: syncing image")
+		Msg("checking upstream image on demand")
 
 	if err := service.refreshRegistryTemporaryCredentials(); err != nil {
 		service.log.Error().Err(err).Msg("failed to refresh credentials")
@@ -403,7 +403,7 @@ func (service *BaseService) SyncReferrers(ctx context.Context, repo string,
 	}
 
 	// commit to storage
-	err = service.destination.CommitAll(repo, localImageRef)
+	err = service.destination.CommitAll(repo, localImageRef, "")
 	if err != nil {
 		service.log.Error().Str("errorType", common.TypeOf(err)).Str("repo", repo).
 			Err(err).Msg("failed to commit image")
@@ -477,7 +477,7 @@ func (service *BaseService) SyncRepo(ctx context.Context, repo string) error {
 }
 
 func (service *BaseService) syncRef(ctx context.Context, localRepo string, remoteRepo string, remoteImageRef, localImageRef ref.Ref,
-	remoteDigest godigest.Digest, force bool,
+	expectedLocalDigest, upstreamDigest godigest.Digest, force bool,
 ) (bool, error) {
 	var reference string
 
@@ -512,7 +512,7 @@ func (service *BaseService) syncRef(ctx context.Context, localRepo string, remot
 	// A single-platform local tag may have the same digest as one child in the upstream index.
 	// Forced sync must copy the upstream reference so platform filtering can rebuild the local index.
 	if !force {
-		skipImage, err = service.destination.CanSkipImage(localRepo, reference, remoteDigest)
+		skipImage, err = service.destination.CanSkipImage(localRepo, reference, expectedLocalDigest, upstreamDigest)
 		if err != nil {
 			service.log.Error().Err(err).Str("errortype", common.TypeOf(err)).
 				Str("repo", localRepo).Str("reference", remoteImageRef.Tag).
@@ -652,7 +652,8 @@ func (service *BaseService) syncImage(ctx context.Context, localRepo, remoteRepo
 	defer service.destination.CleanupImage(localImageRef, localRepo) //nolint: errcheck
 
 	// first sync image
-	skipped, err := service.syncRef(ctx, localRepo, remoteRepo, remoteImageRef, localImageRef, localDigest, force)
+	skipped, err := service.syncRef(ctx, localRepo, remoteRepo, remoteImageRef, localImageRef,
+		localDigest, remoteDigest, force)
 	if err != nil {
 		return err
 	}
@@ -680,12 +681,18 @@ func (service *BaseService) syncImage(ctx context.Context, localRepo, remoteRepo
 	}
 
 	// commit to storage
-	err = service.destination.CommitAll(localRepo, localImageRef)
+	err = service.destination.CommitAll(localRepo, localImageRef, remoteDigest)
 	if err != nil {
 		service.log.Error().Str("errorType", common.TypeOf(err)).Str("repo", localRepo).
 			Err(err).Msg("failed to commit image")
 
 		return err
+	}
+	if skipped {
+		service.log.Info().Str("repo", localRepo).Str("reference", tag).
+			Msg("local image is already up to date")
+
+		return nil
 	}
 
 	service.log.Info().Str("repo", localRepo).Str("reference", tag).Msg("successfully synced image")
@@ -772,7 +779,8 @@ func (service *BaseService) syncReferrers(ctx context.Context, tags []string, lo
 
 			localImageRef = localImageRef.SetDigest(desc.Digest.String())
 
-			_, err := service.syncRef(ctx, localRepo, remoteRepo, remoteImageRef, localImageRef, desc.Digest, false)
+			_, err := service.syncRef(ctx, localRepo, remoteRepo, remoteImageRef, localImageRef,
+				desc.Digest, desc.Digest, false)
 			if err != nil {
 				service.log.Error().Err(err).Str("errortype", common.TypeOf(err)).
 					Str("repo", localRepo).Str("local reference", localImageRef.Tag).
@@ -793,7 +801,8 @@ func (service *BaseService) syncReferrers(ctx context.Context, tags []string, lo
 
 					localImageRef = localImageRef.SetTag(tag)
 
-					_, err := service.syncRef(ctx, localRepo, remoteRepo, remoteImageRef, localImageRef, remoteDigest, false)
+					_, err := service.syncRef(ctx, localRepo, remoteRepo, remoteImageRef, localImageRef,
+						remoteDigest, remoteDigest, false)
 					if err != nil {
 						service.log.Error().Err(err).Str("errortype", common.TypeOf(err)).
 							Str("repo", localRepo).Str("local reference", localImageRef.Tag).
