@@ -17,6 +17,7 @@ type request struct {
 	hostPrefix string
 	repo       string
 	reference  string
+	force      bool
 	// used for background retries, at most one background retry per service
 	serviceID    int
 	isBackground bool
@@ -48,10 +49,21 @@ func (onDemand *BaseOnDemand) SyncImage(ctx context.Context, repo, reference str
 }
 
 func (onDemand *BaseOnDemand) SyncImageForHostPrefix(ctx context.Context, hostPrefix, repo, reference string) error {
+	return onDemand.syncImageForHostPrefix(ctx, hostPrefix, repo, reference, false)
+}
+
+func (onDemand *BaseOnDemand) SyncImageForHostPrefixForced(ctx context.Context, hostPrefix, repo, reference string) error {
+	return onDemand.syncImageForHostPrefix(ctx, hostPrefix, repo, reference, true)
+}
+
+func (onDemand *BaseOnDemand) syncImageForHostPrefix(ctx context.Context, hostPrefix, repo, reference string,
+	force bool,
+) error {
 	req := request{
 		hostPrefix: hostPrefix,
 		repo:       repo,
 		reference:  reference,
+		force:      force,
 	}
 
 	syncResult := make(chan error)
@@ -70,7 +82,7 @@ func (onDemand *BaseOnDemand) SyncImageForHostPrefix(ctx context.Context, hostPr
 
 	defer onDemand.requestStore.Delete(req)
 
-	go onDemand.syncImage(ctx, hostPrefix, repo, reference, syncResult)
+	go onDemand.syncImage(ctx, hostPrefix, repo, reference, force, syncResult)
 
 	err := <-syncResult
 
@@ -228,7 +240,9 @@ retry:
 	syncResult <- err
 }
 
-func (onDemand *BaseOnDemand) syncImage(ctx context.Context, hostPrefix, repo, reference string, syncResult chan error) {
+func (onDemand *BaseOnDemand) syncImage(ctx context.Context, hostPrefix, repo, reference string, force bool,
+	syncResult chan error,
+) {
 	defer close(syncResult)
 
 	var err error
@@ -256,7 +270,7 @@ retry:
 		// Create a detached context with timeout to ensure sync completes even if HTTP client disconnects.
 		// This prevents Kubernetes timeout/retries from aborting in-progress image downloads.
 		syncCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), timeout)
-		err = service.SyncImage(syncCtx, repo, reference)
+		err = syncServiceImage(service, syncCtx, repo, reference, force)
 
 		cancel()
 
@@ -274,6 +288,7 @@ retry:
 				hostPrefix:   effectiveHostPrefix,
 				repo:         repo,
 				reference:    reference,
+				force:        force,
 				serviceID:    serviceID,
 				isBackground: true,
 			}
@@ -302,7 +317,7 @@ retry:
 					retryCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), serviceTimeout)
 					defer cancel()
 
-					err := service.SyncImage(retryCtx, repo, reference)
+					err := syncServiceImage(service, retryCtx, repo, reference, force)
 					if err != nil {
 						onDemand.log.Error().Str("errorType", common.TypeOf(err)).Str("repo", repo).Str("reference", reference).
 							Err(err).Msg("sync routine: error while copying image")
@@ -324,4 +339,12 @@ retry:
 	}
 
 	syncResult <- err
+}
+
+func syncServiceImage(service Service, ctx context.Context, repo, reference string, force bool) error {
+	if force {
+		return service.SyncImageForced(ctx, repo, reference)
+	}
+
+	return service.SyncImage(ctx, repo, reference)
 }

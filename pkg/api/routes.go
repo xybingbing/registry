@@ -40,6 +40,7 @@ import (
 	"zotregistry.dev/zot/v2/pkg/api/constants"
 	apiErr "zotregistry.dev/zot/v2/pkg/api/errors"
 	zcommon "zotregistry.dev/zot/v2/pkg/common"
+	"zotregistry.dev/zot/v2/pkg/compat"
 	gqlPlayground "zotregistry.dev/zot/v2/pkg/debug/gqlplayground"
 	"zotregistry.dev/zot/v2/pkg/debug/pprof"
 	debug "zotregistry.dev/zot/v2/pkg/debug/swagger"
@@ -2777,9 +2778,49 @@ func getImageManifest(ctx context.Context, routeHandler *RouteHandler, imgStore 
 ) ([]byte, godigest.Digest, string, error) {
 	syncEnabled := isSyncOnDemandEnabled(routeHandler.c)
 
-	// Prefer the local image for both tag and digest references. On-demand sync is only a cache miss fallback.
 	content, digest, mediaType, err := imgStore.GetImageManifest(name, reference)
-	if err == nil || !syncEnabled {
+	if err == nil {
+		if !syncEnabled || !isTagReference(reference) {
+			return content, digest, mediaType, nil
+		}
+
+		if isImageIndexMediaType(mediaType) {
+			routeHandler.c.Log.Info().Str("repository", name).Str("reference", reference).
+				Msg("checking multi-platform image for an upstream update")
+
+			if errSync := routeHandler.c.SyncOnDemand.SyncImageForHostPrefix(
+				ctx, hostPrefix, name, reference,
+			); errSync != nil {
+				routeHandler.c.Log.Warn().Err(errSync).Str("repository", name).Str("reference", reference).
+					Msg("failed to refresh multi-platform image, serving local index")
+
+				return content, digest, mediaType, nil
+			}
+
+			return getRefreshedImageManifest(routeHandler, imgStore, name, reference,
+				content, digest, mediaType)
+		}
+
+		if !isImageManifestMediaType(mediaType) {
+			return content, digest, mediaType, nil
+		}
+
+		routeHandler.c.Log.Info().Str("repository", name).Str("reference", reference).
+			Msg("local tag is a single-platform image, trying to sync a multi-platform image on demand")
+
+		if errSync := routeHandler.c.SyncOnDemand.SyncImageForHostPrefixForced(ctx, hostPrefix, name, reference); errSync != nil {
+			if isUpstreamImageNotFound(errSync) {
+				return content, digest, mediaType, nil
+			}
+
+			return nil, "", "", errSync
+		}
+
+		return getRefreshedImageManifest(routeHandler, imgStore, name, reference,
+			content, digest, mediaType)
+	}
+
+	if !syncEnabled {
 		return content, digest, mediaType, err
 	}
 
@@ -2794,6 +2835,38 @@ func getImageManifest(ctx context.Context, routeHandler *RouteHandler, imgStore 
 	}
 
 	return imgStore.GetImageManifest(name, reference)
+}
+
+func isTagReference(reference string) bool {
+	_, err := godigest.Parse(reference)
+
+	return err != nil
+}
+
+func isImageManifestMediaType(mediaType string) bool {
+	return mediaType == ispec.MediaTypeImageManifest || compat.IsCompatibleManifestMediaType(mediaType)
+}
+
+func isImageIndexMediaType(mediaType string) bool {
+	return mediaType == ispec.MediaTypeImageIndex || compat.IsCompatibleManifestListMediaType(mediaType)
+}
+
+func isUpstreamImageNotFound(err error) bool {
+	return errors.Is(err, zerr.ErrManifestNotFound) || errors.Is(err, zerr.ErrRepoNotFound)
+}
+
+func getRefreshedImageManifest(routeHandler *RouteHandler, imgStore storageTypes.ImageStore, name, reference string,
+	previousContent []byte, previousDigest godigest.Digest, previousMediaType string,
+) ([]byte, godigest.Digest, string, error) {
+	content, digest, mediaType, err := imgStore.GetImageManifest(name, reference)
+	if err != nil {
+		routeHandler.c.Log.Warn().Err(err).Str("repository", name).Str("reference", reference).
+			Msg("failed to read refreshed image, serving previous local image")
+
+		return previousContent, previousDigest, previousMediaType, nil
+	}
+
+	return content, digest, mediaType, nil
 }
 
 type APIKeyPayload struct { //nolint:revive,gosec

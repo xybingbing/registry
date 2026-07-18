@@ -14,6 +14,10 @@ func (onDemand *BaseOnDemand) SyncImageForHostPrefix(ctx context.Context, hostPr
 	return nil
 }
 
+func (onDemand *BaseOnDemand) SyncImageForHostPrefixForced(ctx context.Context, hostPrefix, repo, reference string) error {
+	return nil
+}
+
 func (onDemand *BaseOnDemand) SyncReferrers(ctx context.Context, repo string,
 	subjectDigestStr string, referenceTypes []string,
 ) error {

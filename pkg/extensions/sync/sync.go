@@ -27,6 +27,8 @@ type Service interface {
 	SyncRepo(ctx context.Context, repo string) error // used by periodically sync
 	// Sync an image (repo:tag || repo:digest) into ImageStore.
 	SyncImage(ctx context.Context, repo, reference string) error // used by sync on demand
+	// SyncImageForced copies an image even when its current local and remote digests match.
+	SyncImageForced(ctx context.Context, repo, reference string) error
 	// Sync referrers for an image (repo:subjectDigestStr) into ImageStore.
 	SyncReferrers(ctx context.Context, repo string, subjectDigestStr string, referenceTypes []string) error
 	// Remove all internal catalog entries.

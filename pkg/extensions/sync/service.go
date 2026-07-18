@@ -300,6 +300,15 @@ func (service *BaseService) GetNextRepo(lastRepo string) (string, error) {
 
 // SyncImage on demand.
 func (service *BaseService) SyncImage(ctx context.Context, repo, reference string) error {
+	return service.syncImageOnDemand(ctx, repo, reference, false)
+}
+
+// SyncImageForced syncs an image even when the local and remote digests match.
+func (service *BaseService) SyncImageForced(ctx context.Context, repo, reference string) error {
+	return service.syncImageOnDemand(ctx, repo, reference, true)
+}
+
+func (service *BaseService) syncImageOnDemand(ctx context.Context, repo, reference string, force bool) error {
 	remoteRepo := repo
 
 	remoteURL := service.remote.GetHostName()
@@ -321,7 +330,7 @@ func (service *BaseService) SyncImage(ctx context.Context, repo, reference strin
 		service.log.Error().Err(err).Msg("failed to refresh credentials")
 	}
 
-	return service.syncImage(ctx, repo, remoteRepo, reference, nil, false)
+	return service.syncImage(ctx, repo, remoteRepo, reference, nil, false, force)
 }
 
 func (service *BaseService) SyncReferrers(ctx context.Context, repo string,
@@ -443,7 +452,7 @@ func (service *BaseService) SyncRepo(ctx context.Context, repo string) error {
 			continue
 		}
 
-		err = service.syncImage(ctx, localRepo, repo, tag, tags, true)
+		err = service.syncImage(ctx, localRepo, repo, tag, tags, true, false)
 		if err != nil {
 			if errors.Is(err, zerr.ErrSyncImageNotSigned) ||
 				errors.Is(err, zerr.ErrUnauthorizedAccess) ||
@@ -468,7 +477,7 @@ func (service *BaseService) SyncRepo(ctx context.Context, repo string) error {
 }
 
 func (service *BaseService) syncRef(ctx context.Context, localRepo string, remoteRepo string, remoteImageRef, localImageRef ref.Ref,
-	remoteDigest godigest.Digest,
+	remoteDigest godigest.Digest, force bool,
 ) (bool, error) {
 	var reference string
 
@@ -500,12 +509,15 @@ func (service *BaseService) syncRef(ctx context.Context, localRepo string, remot
 		}
 	}
 
-	// check if image is already synced
-	skipImage, err = service.destination.CanSkipImage(localRepo, reference, remoteDigest)
-	if err != nil {
-		service.log.Error().Err(err).Str("errortype", common.TypeOf(err)).
-			Str("repo", localRepo).Str("reference", remoteImageRef.Tag).
-			Msg("couldn't check if the local image can be skipped")
+	// A single-platform local tag may have the same digest as one child in the upstream index.
+	// Forced sync must copy the upstream reference so platform filtering can rebuild the local index.
+	if !force {
+		skipImage, err = service.destination.CanSkipImage(localRepo, reference, remoteDigest)
+		if err != nil {
+			service.log.Error().Err(err).Str("errortype", common.TypeOf(err)).
+				Str("repo", localRepo).Str("reference", remoteImageRef.Tag).
+				Msg("couldn't check if the local image can be skipped")
+		}
 	}
 
 	if !skipImage {
@@ -562,7 +574,7 @@ func (service *BaseService) computeLocalStoredImageDigest(ctx context.Context, r
 }
 
 func (service *BaseService) syncImage(ctx context.Context, localRepo, remoteRepo, tag string,
-	repoTags []string, withReferrers bool,
+	repoTags []string, withReferrers, force bool,
 ) error {
 	service.clientLock.RLock()
 	defer service.clientLock.RUnlock()
@@ -640,7 +652,7 @@ func (service *BaseService) syncImage(ctx context.Context, localRepo, remoteRepo
 	defer service.destination.CleanupImage(localImageRef, localRepo) //nolint: errcheck
 
 	// first sync image
-	skipped, err := service.syncRef(ctx, localRepo, remoteRepo, remoteImageRef, localImageRef, localDigest)
+	skipped, err := service.syncRef(ctx, localRepo, remoteRepo, remoteImageRef, localImageRef, localDigest, force)
 	if err != nil {
 		return err
 	}
@@ -760,7 +772,7 @@ func (service *BaseService) syncReferrers(ctx context.Context, tags []string, lo
 
 			localImageRef = localImageRef.SetDigest(desc.Digest.String())
 
-			_, err := service.syncRef(ctx, localRepo, remoteRepo, remoteImageRef, localImageRef, desc.Digest)
+			_, err := service.syncRef(ctx, localRepo, remoteRepo, remoteImageRef, localImageRef, desc.Digest, false)
 			if err != nil {
 				service.log.Error().Err(err).Str("errortype", common.TypeOf(err)).
 					Str("repo", localRepo).Str("local reference", localImageRef.Tag).
@@ -781,7 +793,7 @@ func (service *BaseService) syncReferrers(ctx context.Context, tags []string, lo
 
 					localImageRef = localImageRef.SetTag(tag)
 
-					_, err := service.syncRef(ctx, localRepo, remoteRepo, remoteImageRef, localImageRef, remoteDigest)
+					_, err := service.syncRef(ctx, localRepo, remoteRepo, remoteImageRef, localImageRef, remoteDigest, false)
 					if err != nil {
 						service.log.Error().Err(err).Str("errortype", common.TypeOf(err)).
 							Str("repo", localRepo).Str("local reference", localImageRef.Tag).

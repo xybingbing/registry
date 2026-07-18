@@ -39,9 +39,10 @@ import (
 )
 
 type testOnDemandService struct {
-	hostPrefix string
-	imageCalls int
-	refCalls   int
+	hostPrefix      string
+	imageCalls      int
+	forceImageCalls int
+	refCalls        int
 }
 
 func (service *testOnDemandService) GetNextRepo(lastRepo string) (string, error) {
@@ -54,6 +55,12 @@ func (service *testOnDemandService) SyncRepo(ctx context.Context, repo string) e
 
 func (service *testOnDemandService) SyncImage(ctx context.Context, repo, reference string) error {
 	service.imageCalls++
+
+	return nil
+}
+
+func (service *testOnDemandService) SyncImageForced(ctx context.Context, repo, reference string) error {
+	service.forceImageCalls++
 
 	return nil
 }
@@ -107,6 +114,22 @@ func TestOnDemandHostPrefix(t *testing.T) {
 		So(err, ShouldBeNil)
 		So(defaultService.imageCalls, ShouldEqual, 0)
 		So(ghcrService.imageCalls, ShouldEqual, 1)
+	})
+
+	Convey("forced sync selects the matching service and bypasses the regular sync method", t, func() {
+		defaultService := &testOnDemandService{}
+		ghcrService := &testOnDemandService{hostPrefix: "ghcr"}
+
+		onDemand := NewOnDemand(log.NewTestLogger())
+		onDemand.Add(defaultService)
+		onDemand.Add(ghcrService)
+
+		err := onDemand.SyncImageForHostPrefixForced(context.Background(), "ghcr", "library/alpine", "latest")
+		So(err, ShouldBeNil)
+		So(defaultService.imageCalls, ShouldEqual, 0)
+		So(defaultService.forceImageCalls, ShouldEqual, 0)
+		So(ghcrService.imageCalls, ShouldEqual, 0)
+		So(ghcrService.forceImageCalls, ShouldEqual, 1)
 	})
 
 	Convey("unknown host prefix falls back to legacy unprefixed services", t, func() {
@@ -257,7 +280,7 @@ func TestService(t *testing.T) {
 		service.destination = mockDest
 
 		ctx := context.Background()
-		err = service.syncImage(ctx, "localrepo", "remoterepo", "tag1", []string{}, false)
+		err = service.syncImage(ctx, "localrepo", "remoterepo", "tag1", []string{}, false, false)
 
 		// Should succeed without error
 		So(err, ShouldBeNil)
@@ -298,7 +321,7 @@ func TestService(t *testing.T) {
 		service.destination = mockDest
 
 		ctx := context.Background()
-		err = service.syncImage(ctx, "localrepo", "remoterepo", "tag1", []string{}, true)
+		err = service.syncImage(ctx, "localrepo", "remoterepo", "tag1", []string{}, true, false)
 
 		// We expect an error when ReferrerList fails with "ref is not set" error
 		So(err, ShouldNotBeNil)
