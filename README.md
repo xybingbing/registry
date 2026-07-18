@@ -5,7 +5,7 @@
 镜像地址：
 
 ```text
-ghcr.io/xybingbing/registry:v1.0
+ghcr.io/xybingbing/registry:latest
 ```
 
 ## 界面预览
@@ -49,7 +49,7 @@ docker run -d \
   --restart unless-stopped \
   -p 5000:5000 \
   -v registry-data:/var/lib/registry \
-  ghcr.io/xybingbing/registry:v1.0
+  ghcr.io/xybingbing/registry:latest
 ```
 
 浏览器访问 [http://localhost:5000](http://localhost:5000)。
@@ -91,7 +91,7 @@ docker run -d \
   -p 5000:5000 \
   -v registry-data:/var/lib/registry \
   -v "$(pwd)/config.json:/etc/zot/config.json:ro" \
-  ghcr.io/xybingbing/registry:v1.0
+  ghcr.io/xybingbing/registry:latest
 ```
 
 当前示例配置启用了：
@@ -126,7 +126,7 @@ docker buildx build \
   --build-arg VERSION=v1.0 \
   --build-arg COMMIT="$(git rev-parse --short HEAD)" \
   --provenance=false \
-  -t ghcr.io/xybingbing/registry:v1.0 \
+  -t ghcr.io/xybingbing/registry:latest \
   --push .
 ```
 
@@ -136,7 +136,7 @@ docker buildx build \
 
 ```bash
 docker buildx imagetools inspect \
-  ghcr.io/xybingbing/registry:v1.0
+  ghcr.io/xybingbing/registry:latest
 ```
 
 ## GitHub Actions 自动发布
