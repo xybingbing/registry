@@ -62,8 +62,8 @@ FROM ${RUNTIME_IMAGE} AS final
 ARG VERSION=dev
 ARG COMMIT=unknown
 
-LABEL org.opencontainers.image.title="zot" \
-      org.opencontainers.image.description="OCI容器镜像注册表" \
+LABEL org.opencontainers.image.title="registry" \
+      org.opencontainers.image.description="OCI/Docker容器镜像注册表" \
       org.opencontainers.image.version="$VERSION" \
       org.opencontainers.image.revision="$COMMIT" \
       org.opencontainers.image.source="https://github.com/xybingbing/registry"

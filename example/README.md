@@ -3,7 +3,8 @@
 在项目根目录执行：
 
 ```bash
-docker compose -f example/compose.yaml up -d --build
+docker run --rm --entrypoint htpasswd httpd:2.4-alpine 
+  -Bbn registry-admin 'registry-test-password' > example/auth/htpasswd
 ```
 
 默认只监听 `127.0.0.1:5000`，Web UI 地址为 [http://localhost:5000](http://localhost:5000)。测试账号如下：
@@ -16,9 +17,6 @@ docker compose -f example/compose.yaml up -d --build
 默认账号只用于本地测试。可以在启动前通过环境变量修改账号、密码和端口：
 
 ```bash
-REGISTRY_USERNAME=test-admin \
-REGISTRY_PASSWORD='replace-with-a-test-password' \
-REGISTRY_PORT=5100 \
 docker compose -f example/compose.yaml up -d --build
 ```
 
