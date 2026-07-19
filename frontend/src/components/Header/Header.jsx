@@ -8,13 +8,10 @@ import { host } from '../../host';
 import {
   AppBar,
   Toolbar,
-  Grid,
   Button,
   TextField,
   InputAdornment,
-  IconButton,
   Box,
-  Typography,
 } from '@mui/material';
 import SearchIcon from '@mui/icons-material/Search';
 import UserAccountMenu from './UserAccountMenu';
@@ -22,19 +19,28 @@ import makeStyles from '@mui/styles/makeStyles';
 import logo from '../../assets/zotLogoColored.svg';
 import logoxs from '../../assets/zotLogoColoredSmall.svg';
 
-const useStyles = makeStyles((theme) => ({
+const useStyles = makeStyles(() => ({
   appBar: {
     backgroundColor: '#ffffff',
     boxShadow: '0 1px 3px rgba(0,0,0,0.08)',
     borderBottom: '1px solid #e5e7eb',
   },
   toolbar: {
+    boxSizing: 'border-box',
+    columnGap: '1rem',
+    display: 'grid',
+    gridTemplateColumns: 'max-content minmax(12rem, 30rem) minmax(2.75rem, 1fr)',
     position: 'relative',
     minHeight: '56px',
     padding: '0 1.5rem',
     maxWidth: '1200px',
     width: '100%',
     margin: '0 auto',
+    '@media (max-width: 700px)': {
+      columnGap: '0.5rem',
+      gridTemplateColumns: 'minmax(0, 1fr) auto',
+      padding: '0 0.75rem',
+    },
   },
   leftNav: {
     display: 'flex',
@@ -47,6 +53,10 @@ const useStyles = makeStyles((theme) => ({
     marginRight: '2rem',
     display: 'flex',
     alignItems: 'center',
+    flexShrink: 0,
+    '@media (max-width: 900px)': {
+      marginRight: '1rem',
+    },
   },
   logoImg: {
     height: '100%',
@@ -60,9 +70,14 @@ const useStyles = makeStyles((theme) => ({
     padding: '6px 0',
     borderBottom: '2px solid transparent',
     transition: 'color 0.2s, border-color 0.2s',
+    flexShrink: 0,
+    whiteSpace: 'nowrap',
     '&:hover': {
       color: '#0F2139',
       borderBottomColor: '#2563eb',
+    },
+    '@media (max-width: 700px)': {
+      marginRight: '0.75rem',
     },
   },
   activeNavLink: {
@@ -73,14 +88,18 @@ const useStyles = makeStyles((theme) => ({
     marginRight: '1.5rem',
     padding: '6px 0',
     borderBottom: '2px solid #2563eb',
+    flexShrink: 0,
+    whiteSpace: 'nowrap',
+    '@media (max-width: 700px)': {
+      marginRight: '0.75rem',
+    },
   },
   searchBox: {
-    left: '50%',
-    maxWidth: '480px',
-    position: 'absolute',
-    top: '50%',
-    transform: 'translate(-50%, -50%)',
-    width: '42vw',
+    minWidth: 0,
+    width: '100%',
+    '@media (max-width: 700px)': {
+      display: 'none',
+    },
     '& .MuiOutlinedInput-root': {
       backgroundColor: '#f9fafb',
       borderRadius: '8px',
@@ -116,8 +135,7 @@ const useStyles = makeStyles((theme) => ({
     alignItems: 'center',
     display: 'flex',
     gap: '0.5rem',
-    marginLeft: 'auto',
-    minWidth: '120px',
+    minWidth: 0,
     justifyContent: 'flex-end',
     zIndex: 1,
   },
@@ -138,7 +156,7 @@ const useStyles = makeStyles((theme) => ({
   },
 }));
 
-function Header({ setSearchCurrentValue = () => {} }) {
+function Header() {
   const classes = useStyles();
   const location = useLocation();
   const navigate = useNavigate();
@@ -176,7 +194,7 @@ function Header({ setSearchCurrentValue = () => {} }) {
           <div className={classes.logo}>
             <Link to="/home">
               <picture>
-                <source media="(min-width:600px)" srcSet={logo} />
+                <source media="(min-width:900px)" srcSet={logo} />
                 <img alt="Registry" src={logoxs} className={classes.logoImg} />
               </picture>
             </Link>

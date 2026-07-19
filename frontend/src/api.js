@@ -1,7 +1,7 @@
 import axios from 'axios';
 import { isEmpty } from 'lodash';
 import { sortByCriteria } from 'utilities/sortCriteria';
-import { isAuthenticationEnabled, logoutUser } from 'utilities/authUtilities';
+import { isAuthenticated, isAuthenticationEnabled, logoutUser } from 'utilities/authUtilities';
 import { host } from 'host';
 
 axios.interceptors.request.use((config) => {
@@ -21,8 +21,10 @@ axios.interceptors.response.use(
     if (error?.response?.status === 401) {
       if (window.location.pathname.includes('/login')) return Promise.reject(error);
       if (error.config?.url && new URL(error.config.url).pathname === endpoints.logout) return Promise.reject(error);
+      if (!isAuthenticated()) return Promise.reject(error);
       return logoutUser().then(() => Promise.reject(error));
     }
+    return Promise.reject(error);
   }
 );
 

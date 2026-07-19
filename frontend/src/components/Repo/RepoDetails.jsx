@@ -17,7 +17,6 @@ import StorageIcon from "@mui/icons-material/Storage";
 import RepositoryIcon from "../Shared/RepositoryIcon";
 import Tags from './Tabs/Tags.jsx';
 import Loading from '../Shared/Loading';
-import filterConstants from 'utilities/filterConstants';
 import makeStyles from '@mui/styles/makeStyles';
 import transform from '../../utilities/transform';
 
@@ -119,6 +118,7 @@ function RepoDetails() {
   const [tags, setTags] = useState([]);
   const [isLoading, setIsLoading] = useState(true);
   const params = useParams();
+  const navigate = useNavigate();
   const repoName = params['*'] || (params.namespace && params.repo ? `${params.namespace}/${params.repo}` : params.name);
   const abortController = useMemo(() => new AbortController(), []);
   const classes = useStyles();
@@ -150,7 +150,7 @@ function RepoDetails() {
   };
   const handleDeleteTag = (tag) => {
     api.delete(host() + endpoints.deleteImage(repoName, tag), {}, abortController.signal).then((r) => {
-      if (r.status === 202) setTags((prevTags) => prevTags.filter((t) => t.tag !== tag));
+      if (r.status === 202) navigate(0);
     });
   };
   const getLast = () => repoDetailData.lastUpdated
@@ -160,6 +160,7 @@ function RepoDetails() {
 
   const platforms = repoDetailData.platforms || [];
   const repoURL = repoDetailData.source;
+  const canManageRepo = isAuthenticated();
 
   return (
     <div className={classes.container}>
@@ -180,7 +181,7 @@ function RepoDetails() {
               </a>
             )}
           </div>
-          {isAuthenticated() && (
+          {canManageRepo && (
             <div className={classes.actionGroup}>
               <Tooltip title={repoDetailData.isStarred ? '取消星标' : '添加星标'} placement="top">
                 <IconButton onClick={handleStarClick} data-testid="star-button">
@@ -213,7 +214,7 @@ function RepoDetails() {
       </div>
       <Grid container spacing={3}>
         <Grid item xs={12}>
-          <Tags tags={tags} repoName={repoName} onTagDelete={handleDeleteTag} />
+          <Tags tags={tags} repoName={repoName} onTagDelete={canManageRepo ? handleDeleteTag : undefined} />
         </Grid>
       </Grid>
     </div>
