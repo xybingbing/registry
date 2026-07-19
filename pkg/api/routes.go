@@ -77,6 +77,7 @@ func (rh *RouteHandler) SetupRoutes() {
 	// first get Auth middleware in order to first setup openid/ldap/htpasswd, before oidc provider routes are setup
 	auth := AuthHandler(rh.c)
 	authHandler := auth.Middleware
+	distributionAuthHandler := auth.DistributionMiddleware
 
 	// Get CORS config safely
 	allowOrigin := rh.c.Config.GetAllowOrigin()
@@ -132,7 +133,7 @@ func (rh *RouteHandler) SetupRoutes() {
 	}
 
 	prefixedRouter := rh.c.Router.PathPrefix(constants.RoutePrefix).Subrouter()
-	prefixedRouter.Use(authHandler)
+	prefixedRouter.Use(distributionAuthHandler)
 
 	prefixedDistSpecRouter := prefixedRouter.NewRoute().Subrouter()
 	// authz is being enabled if AccessControl is specified

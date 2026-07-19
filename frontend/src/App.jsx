@@ -27,18 +27,19 @@ function App() {
     <div className="App" data-testid="app-container">
       <Router>
         <Routes>
-          <Route element={<AuthWrapper isLoggedIn={isLoggedIn} hasHeader redirect="/login" />}>
+          <Route element={<AuthWrapper isLoggedIn hasHeader />}>
             <Route path="/" element={<Navigate to="/home" />} />
             <Route path="/home" element={<HomePage />} />
             <Route path="/explore" element={<ExplorePage />} />
             <Route path="/image/*" element={<ImageRoute />} />
+          </Route>
+          <Route element={<AuthWrapper isLoggedIn={isLoggedIn} hasHeader redirect="/login" />}>
             {isApiKeyEnabled() && <Route path="/user/apikey" element={<UserManagementPage />} />}
-            <Route path="*" element={<Navigate to="/home" />} />
           </Route>
-          <Route element={<AuthWrapper isLoggedIn={!isLoggedIn} redirect="/" />}>
+          <Route element={<AuthWrapper isLoggedIn={!isLoggedIn} redirect="/home" />}>
             <Route path="/login" element={<LoginPage isLoggedIn={isLoggedIn} setIsLoggedIn={setIsLoggedIn} />} />
-            <Route path="*" element={<Navigate to="/login" />} />
           </Route>
+          <Route path="*" element={<Navigate to="/home" />} />
         </Routes>
       </Router>
     </div>

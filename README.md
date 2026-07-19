@@ -36,6 +36,7 @@ ghcr.io/xybingbing/registry:latest
 - 自动生成包含当前仓库域名和端口的 `docker pull` 命令。
 - 支持 Docker Hub、Quay、GHCR 等上游仓库的按需同步。
 - 支持按 `linux/amd64`、`linux/arm64` 等平台过滤同步内容。
+- 匿名用户可以 pull，push、覆盖标签和删除镜像必须先登录。
 - 使用单个多阶段 Dockerfile 构建前端、Go 服务端和最小运行镜像。
 - 官方镜像同时发布 `linux/amd64` 和 `linux/arm64` 架构。
 
@@ -57,10 +58,38 @@ docker run -d \
 检查服务状态：
 
 ```bash
-curl http://localhost:5000/v2/
+curl http://localhost:5000/readyz
 ```
 
+需要同时测试匿名 pull 和登录 push 时，使用 [Docker Compose 测试示例](example/README.md)。
+
 ## 推送和拉取镜像
+
+默认配置允许匿名 pull，但不提供任何默认 push 账号。先生成自己的凭据文件：
+
+```bash
+docker run --rm --entrypoint htpasswd httpd:2.4-alpine \
+  -Bbn registry-admin '请替换为强密码' > registry.htpasswd
+chmod 600 registry.htpasswd
+```
+
+启动仓库时挂载凭据文件：
+
+```bash
+docker run -d \
+  --name registry \
+  --restart unless-stopped \
+  -p 5000:5000 \
+  -v registry-data:/var/lib/registry \
+  -v "$(pwd)/registry.htpasswd:/etc/zot/htpasswd:ro" \
+  ghcr.io/xybingbing/registry:latest
+```
+
+登录后才能推送：
+
+```bash
+docker login localhost:5000 -u registry-admin
+```
 
 向本地仓库推送 Alpine：
 
@@ -76,7 +105,7 @@ docker push localhost:5000/library/alpine:3.20
 docker pull localhost:5000/library/alpine:3.20
 ```
 
-生产环境应为仓库配置 TLS 和身份认证。使用非 `localhost` 的 HTTP 地址时，还需要在 Docker daemon 中配置 insecure registry。
+pull 不需要执行 `docker login`。按需同步也是由匿名 pull 触发，不需要额外的仓库凭据。生产环境应为仓库配置 TLS；使用非 `localhost` 的 HTTP 地址时，还需要在 Docker daemon 中配置 insecure registry。
 
 ## 配置
 
@@ -98,10 +127,32 @@ docker run -d \
 
 - 搜索扩展和 Web UI。
 - Docker Registry 兼容模式。
+- 匿名 pull 和需要 `htpasswd` 登录的 push 权限控制。
 - Docker Hub、Quay、GHCR、GCR 和 Kubernetes Registry 的按需同步。
 - `amd64` 和 `arm64` 平台过滤。
 
 部署前请根据实际环境检查 [config.json](config.json) 中的同步源、超时、日志级别和存储目录。
+
+### Push 权限
+
+默认策略对所有仓库使用相同权限：
+
+| 客户端 | 权限 |
+| --- | --- |
+| 未登录 | `read`，可以 pull、查看清单和触发按需同步 |
+| 已登录 | `read`、`create`、`update`、`delete`，可以 push、覆盖标签和删除镜像 |
+
+Docker 会自动通过仓库的 token 端点换取短期 Bearer token：匿名客户端只能获得 pull scope，通过 `htpasswd` 验证的客户端才能获得 push scope，无需手动请求或配置 token。
+
+镜像中的 `/etc/zot/htpasswd` 默认为空，确保没有公开的默认账号。部署时必须挂载自己的 bcrypt `htpasswd` 文件，或者在自定义镜像中替换该文件。修改凭据文件后 zot 会自动重新加载。
+
+为生产域名登录：
+
+```bash
+docker login registry.example.com -u registry-admin
+```
+
+不再需要该账号时，从 `htpasswd` 文件中删除对应行即可撤销 push 权限。不要将真实密码或生产凭据提交到 Git 仓库。
 
 ## 按需同步
 

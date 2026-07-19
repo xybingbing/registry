@@ -35,7 +35,7 @@ const logoutUser = () => {
   const finishLogout = (endSessionUrl) => {
     deleteCookie('user');
     localStorage.clear();
-    window.location.replace(endSessionUrl || '/login');
+    window.location.replace(endSessionUrl || '/home');
   };
 
   return api
@@ -55,6 +55,7 @@ const isAuthenticated = () => {
   const authState = JSON.parse(localStorage.getItem('authConfig'));
   if (isNil(authState)) return false;
   if (Object.keys(authState).length === 0) return true;
+  return false;
 };
 
 const isAuthenticationEnabled = () => {

@@ -53,7 +53,8 @@ RUN --mount=type=cache,target=/go/pkg/mod \
         -X zotregistry.dev/zot/v2/pkg/buildinfo.Commit=$COMMIT \
         -X zotregistry.dev/zot/v2/pkg/buildinfo.BinaryType=extended \
         -X zotregistry.dev/zot/v2/pkg/buildinfo.GoVersion=$GO_VERSION" \
-      -o /out/zot ./cmd/zot
+      -o /out/zot ./cmd/zot && \
+    install -m 0600 /dev/null /out/htpasswd
 
 
 FROM ${RUNTIME_IMAGE} AS final
@@ -69,6 +70,7 @@ LABEL org.opencontainers.image.title="zot" \
 
 COPY --from=zot-builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 COPY --from=zot-builder /out/zot /usr/bin/zot
+COPY --from=zot-builder --chmod=0600 /out/htpasswd /etc/zot/htpasswd
 COPY config.json /etc/zot/config.json
 
 VOLUME ["/var/lib/registry"]

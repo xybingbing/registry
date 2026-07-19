@@ -13,12 +13,16 @@ import Loading from 'components/Shared/Loading';
 const useStyles = makeStyles(() => ({
   container: {
     minHeight: '100vh',
-    backgroundColor: '#F6F7F9'
+    backgroundColor: '#F4F6F8'
   },
-  signinContainer: {
+  presentationContainer: {
+    minHeight: '100vh'
+  },
+  signinPanel: {
     display: 'flex',
     alignItems: 'center',
-    justifyContent: 'center'
+    justifyContent: 'center',
+    minHeight: '100vh'
   },
   loadingHidden: {
     display: 'none'
@@ -32,15 +36,20 @@ function LoginPage({ isLoggedIn, setIsLoggedIn }) {
   return (
     <Grid container spacing={0} className={classes.container} data-testid="login-container">
       {isLoading && <Loading />}
-      <Grid item xs={1} md={6} className={`${isLoading ? classes.loadingHidden : ''} hide-on-small`}>
+      <Grid
+        item
+        xs={1}
+        md={5}
+        className={`${classes.presentationContainer} ${isLoading ? classes.loadingHidden : ''} hide-on-small`}
+      >
         <SigninPresentation />
       </Grid>
       <Grid
         item
         xs={12}
         sm={12}
-        md={6}
-        className={`${classes.signinContainer} ${isLoading ? classes.loadingHidden : ''}`}
+        md={7}
+        className={`${classes.signinPanel} ${isLoading ? classes.loadingHidden : ''}`}
       >
         <SignIn isLoggedIn={isLoggedIn} setIsLoggedIn={setIsLoggedIn} wrapperSetLoading={setIsLoading} />
       </Grid>

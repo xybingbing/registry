@@ -56,8 +56,9 @@ type AuthnMiddleware struct {
 }
 
 type AuthSetup struct {
-	Middleware   mux.MiddlewareFunc
-	TokenHandler http.HandlerFunc
+	Middleware             mux.MiddlewareFunc
+	DistributionMiddleware mux.MiddlewareFunc
+	TokenHandler           http.HandlerFunc
 }
 
 func AuthHandler(ctlr *Controller) AuthSetup {
@@ -69,14 +70,56 @@ func AuthHandler(ctlr *Controller) AuthSetup {
 	authConfig := ctlr.Config.CopyAuthConfig()
 	if authConfig.IsBearerAuthEnabled() {
 		bearerAuth := NewBearerAuth(authConfig, ctlr.Log)
+		middleware := bearerAuth.Middleware(ctlr)
 
 		return AuthSetup{
-			Middleware:   bearerAuth.Middleware(ctlr),
-			TokenHandler: bearerAuth.TokenExchangeHandler(),
+			Middleware:             middleware,
+			DistributionMiddleware: middleware,
+			TokenHandler:           bearerAuth.TokenExchangeHandler(),
 		}
 	}
 
-	return AuthSetup{Middleware: authnMiddleware.tryAuthnHandlers(ctlr)}
+	middleware := authnMiddleware.tryAuthnHandlers(ctlr)
+	authSetup := AuthSetup{
+		Middleware:             middleware,
+		DistributionMiddleware: middleware,
+	}
+
+	accessControlConfig := ctlr.Config.CopyAccessControlConfig()
+	if authConfig.IsHtpasswdAuthEnabled() && accessControlConfig.HasMixedAnonymousAndAuthenticatedPolicies() {
+		registryTokenAuth, err := newRegistryTokenAuth(ctlr)
+		if err != nil {
+			ctlr.Log.Panic().Err(err).Msg("failed to initialize registry token authentication")
+		}
+
+		authSetup.DistributionMiddleware = selectDistributionAuthMiddleware(
+			middleware,
+			registryTokenAuth.Middleware(),
+		)
+		authSetup.TokenHandler = registryTokenAuth.TokenHandler()
+	}
+
+	return authSetup
+}
+
+func selectDistributionAuthMiddleware(uiAuth, registryAuth mux.MiddlewareFunc) mux.MiddlewareFunc {
+	return func(next http.Handler) http.Handler {
+		uiHandler := uiAuth(next)
+		registryHandler := registryAuth(next)
+		zotExtensionPath := constants.RoutePrefix + constants.BasePrefix
+
+		return http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+			isZotExtension := request.URL.Path == zotExtensionPath ||
+				strings.HasPrefix(request.URL.Path, zotExtensionPath+"/")
+			if hasSessionHeader(request) || isZotExtension {
+				uiHandler.ServeHTTP(response, request)
+
+				return
+			}
+
+			registryHandler.ServeHTTP(response, request)
+		})
+	}
 }
 
 func (amw *AuthnMiddleware) sessionAuthn(ctlr *Controller, userAc *reqCtx.UserAccessControl,

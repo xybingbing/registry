@@ -3,36 +3,28 @@ import React from 'react';
 import { Stack, Typography } from '@mui/material';
 import { makeStyles } from '@mui/styles';
 
-import logoWhite from '../../assets/zotLogoWhiteHorizontal.svg';
-
-const useStyles = makeStyles((theme) => ({
+const useStyles = makeStyles(() => ({
   container: {
-    background: 'linear-gradient(135deg, #0F2139 0%, #1a3a5c 100%)',
-    minHeight: '100%',
+    backgroundColor: '#18324B',
+    minHeight: '100vh',
     width: '100%',
     display: 'flex',
     alignItems: 'center',
-    justifyContent: 'center'
+    justifyContent: 'center',
+    padding: '4rem',
+    boxSizing: 'border-box'
   },
   contentContainer: {
-    width: '51%',
-    height: '22%'
-  },
-  logoContainer: {
     width: '100%',
-    display: 'flex',
-    justifyContent: 'center'
-  },
-  logo: {
-    width: '64%'
+    maxWidth: '27rem'
   },
   mainText: {
     color: '#F6F7F9',
     fontWeight: '700',
     width: '100%',
     fontSize: '2.25rem',
-    lineHeight: '2.75rem',
-    letterSpacing: '-0.02em'
+    lineHeight: '3rem',
+    letterSpacing: 0
   }
 }));
 
@@ -40,12 +32,9 @@ export default function SigninPresentation() {
   const classes = useStyles();
   return (
     <div className={classes.container}>
-      <Stack spacing={'3rem'} className={classes.contentContainer} data-testid="presentation-container">
-        <div className={classes.logoContainer}>
-          <img src={logoWhite} alt="zot logo" className={classes.logo}></img>
-        </div>
+      <Stack spacing={'2rem'} className={classes.contentContainer} data-testid="presentation-container">
         <Typography variant="h2" className={classes.mainText}>
-          OCI 原生容器镜像仓库，简洁高效
+          Docker / OCI 原生容器镜像仓库
         </Typography>
       </Stack>
     </div>

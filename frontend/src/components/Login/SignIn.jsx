@@ -19,6 +19,7 @@ import Typography from '@mui/material/Typography';
 import Alert from '@mui/material/Alert';
 import CircularProgress from '@mui/material/CircularProgress';
 import Loading from '../Shared/Loading';
+import ArrowBackRoundedIcon from '@mui/icons-material/ArrowBackRounded';
 
 import { GoogleLoginButton, GithubLoginButton, GitlabLoginButton, OIDCLoginButton } from './ThirdPartyLoginComponents';
 
@@ -30,45 +31,79 @@ const useStyles = makeStyles(() => ({
     display: 'flex',
     alignItems: 'center',
     justifyContent: 'center',
-    position: 'relative'
+    position: 'relative',
+    width: '100%',
+    minHeight: '100vh',
+    padding: '2rem',
+    boxSizing: 'border-box'
+  },
+  signinColumn: {
+    display: 'flex',
+    flexDirection: 'column',
+    alignItems: 'stretch',
+    width: '100%',
+    maxWidth: '30rem'
+  },
+  backButton: {
+    alignSelf: 'flex-start',
+    color: '#52637A',
+    fontSize: '0.9375rem',
+    textTransform: 'none',
+    marginBottom: '1rem',
+    paddingLeft: 0,
+    '&:hover': {
+      backgroundColor: 'transparent',
+      color: '#18324B'
+    }
   },
   loginCard: {
     display: 'flex',
     flexDirection: 'column',
     alignItems: 'center',
     justifyContent: 'center',
-    width: '60%',
-    height: '60%',
+    width: '100%',
     background: '#FFFFFF',
-    boxShadow: '0rem 0.3125rem 0.625rem rgba(131, 131, 131, 0.08)',
-    borderRadius: '0.75rem',
-    minWidth: '30rem'
+    border: '0.0625rem solid #E1E6EC',
+    boxShadow: '0 0.75rem 2rem rgba(24, 50, 75, 0.08)',
+    borderRadius: '0.5rem'
   },
   loginCardContent: {
     display: 'flex',
     flexDirection: 'column',
-    border: '0.1875rem black',
     width: '100%',
-    padding: '3rem'
+    padding: '2.5rem',
+    '&:last-child': {
+      paddingBottom: '2.5rem'
+    },
+    '@media (max-width: 600px)': {
+      padding: '1.5rem',
+      '&:last-child': {
+        paddingBottom: '1.5rem'
+      }
+    }
   },
   text: {
     color: '#14191F',
     width: '100%',
-    fontSize: '1.5rem',
+    fontSize: '1.75rem',
     lineHeight: '2.25rem',
-    letterSpacing: '-0.01rem',
+    fontWeight: '700',
+    letterSpacing: 0,
     marginBottom: '0.25rem'
   },
   subtext: {
     color: '#52637A',
     width: '100%',
     fontSize: '1rem',
-    marginBottom: '2.375rem'
+    marginBottom: '2rem'
   },
   textField: {
-    borderRadius: '0.25rem',
     marginTop: 0,
-    marginBottom: '1.5rem'
+    marginBottom: '1.25rem',
+    '& .MuiOutlinedInput-root': {
+      borderRadius: '0.375rem',
+      backgroundColor: '#FFFFFF'
+    }
   },
   textColor: {
     color: '#8596AD'
@@ -81,59 +116,23 @@ const useStyles = makeStyles(() => ({
   },
   continueButton: {
     textTransform: 'none',
-    background: '#F15527',
+    background: '#E86038',
     color: '#FFFFFF',
-    fontSize: '1.438rem',
-    fontWeight: '600',
-    height: '3.125rem',
-    borderRadius: '0.25rem',
-    letterSpacing: '0.01rem',
-    marginBottom: '1rem',
-    padding: 0,
-    boxShadow: 'none',
-    '&:hover': {
-      backgroundColor: '#F15527',
-      boxShadow: 'none'
-    }
-  },
-  continueAsGuestButton: {
-    textTransform: 'none',
-    background: '#FFFFFF',
-    color: '#52637A',
-    fontSize: '1.438rem',
-    fontWeight: '600',
-    height: '3.125rem',
-    borderRadius: '0.25rem',
-    border: '1px solid #52637A',
-    letterSpacing: '0.01rem',
-    marginBottom: '1rem',
-    padding: 0,
-    boxShadow: 'none',
-    '&:hover': {
-      backgroundColor: '#FFFFFF',
-      boxShadow: 'none'
-    }
-  },
-  gitLogo: {
-    height: '24px',
-    borderRadius: '0.25rem',
-    paddingLeft: '1rem'
-  },
-  line: {
-    width: '100%',
-    textAlign: 'center',
-    borderBottom: '0.0625rem solid #C2CBD6',
-    lineHeight: '0.1rem',
-    margin: '0.625rem 0 1.25rem'
-  },
-  lineSpan: {
-    background: '#ffffff',
-    color: '#C2CBD6',
-    padding: '0 0.625rem',
     fontSize: '1rem',
-    fontWeight: '400',
-    paddingLeft: '1rem',
-    paddingRight: '1rem'
+    fontWeight: '600',
+    height: '3.125rem',
+    borderRadius: '0.375rem',
+    letterSpacing: 0,
+    padding: 0,
+    boxShadow: 'none',
+    '&:hover': {
+      backgroundColor: '#C94B27',
+      boxShadow: 'none'
+    },
+    '&.Mui-disabled': {
+      backgroundColor: '#F0A088',
+      color: '#FFFFFF'
+    }
   },
   divider: {
     color: '#C2CBD6',
@@ -155,7 +154,6 @@ export default function SignIn({ isLoggedIn, setIsLoggedIn, wrapperSetLoading = 
   const [requestError, setRequestError] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
   const [authMethods, setAuthMethods] = useState({});
-  const [isGuestLoginEnabled, setIsGuestLoginEnabled] = useState(false);
   const abortController = useMemo(() => new AbortController(), []);
   const navigate = useNavigate();
   const classes = useStyles();
@@ -179,14 +177,6 @@ export default function SignIn({ isLoggedIn, setIsLoggedIn, wrapperSetLoading = 
             localStorage.setItem('authConfig', JSON.stringify(response.data?.http?.auth));
             setIsLoading(false);
             wrapperSetLoading(false);
-            api
-              .get(`${host()}${endpoints.status}`)
-              .then((response) => {
-                if (response.status === 200) {
-                  setIsGuestLoginEnabled(true);
-                }
-              })
-              .catch(() => console.log('could not obtain guest login status'));
           }
           setIsLoading(false);
           wrapperSetLoading(false);
@@ -242,13 +232,6 @@ export default function SignIn({ isLoggedIn, setIsLoggedIn, wrapperSetLoading = 
     handleBasicAuthSubmit();
   };
 
-  const handleGuestClick = () => {
-    setRequestProcessing(false);
-    setRequestError(false);
-    setIsLoggedIn(true);
-    navigate('/home');
-  };
-
   const handleClickExternalLogin = (event, provider) => {
     event.preventDefault();
     window.location.replace(
@@ -300,13 +283,6 @@ export default function SignIn({ isLoggedIn, setIsLoggedIn, wrapperSetLoading = 
     }
   };
 
-  const handleLoginInputFieldKeyDown = (event) => {
-    const keyPressed = event.key;
-    if (keyPressed === 'Enter') {
-      handleBasicAuthSubmit();
-    }
-  };
-
   const renderThirdPartyLoginMethods = () => {
     let isGoogle = isObject(authMethods.openid?.providers?.google);
     let isGitlab = isObject(authMethods.openid?.providers?.gitlab);
@@ -329,87 +305,82 @@ export default function SignIn({ isLoggedIn, setIsLoggedIn, wrapperSetLoading = 
       {isLoading ? (
         <Loading />
       ) : (
-        <Card className={classes.loginCard}>
-          <CardContent className={classes.loginCardContent}>
-            <CssBaseline />
-            <Typography align="left" className={classes.text} component="h1" variant="h4">
-              登录
-            </Typography>
-            <Typography align="left" className={classes.subtext} variant="body1" gutterBottom>
-              欢迎回来，请登录
-            </Typography>
-            {renderThirdPartyLoginMethods()}
-            {Object.keys(authMethods).length > 1 &&
-              Object.keys(authMethods).includes('openid') &&
-              Object.keys(authMethods.openid.providers).length > 0 && (
-                <Divider className={classes.divider} data-testid="openid-divider">
-                  或
-                </Divider>
-              )}
-            {Object.keys(authMethods).includes('htpasswd') && (
-              <Box component="form" onSubmit={null} noValidate autoComplete="off">
-                <TextField
-                  margin="normal"
-                  required
-                  fullWidth
-                  id="username"
-                  label="用户名"
-                  name="username"
-                  className={classes.textField}
-                  inputProps={{ className: classes.textColor }}
-                  InputLabelProps={{ className: classes.labelColor }}
-                  onInput={(e) => handleChange(e, 'username')}
-                  error={usernameError != null}
-                  helperText={usernameError}
-                  onKeyDown={(e) => handleLoginInputFieldKeyDown(e)}
-                />
-                <TextField
-                  margin="normal"
-                  required
-                  fullWidth
-                  name="password"
-                  label="输入密码"
-                  type="password"
-                  id="password"
-                  className={classes.textField}
-                  inputProps={{ className: classes.textColor }}
-                  InputLabelProps={{ className: classes.labelColor }}
-                  onInput={(e) => handleChange(e, 'password')}
-                  error={passwordError != null}
-                  helperText={passwordError}
-                  onKeyDown={(e) => handleLoginInputFieldKeyDown(e)}
-                />
-                {requestProcessing && <CircularProgress style={{ marginTop: 20 }} color="secondary" />}
-                {requestError && (
-                  <Alert style={{ marginTop: 20 }} severity="error">
-                    认证失败，请重试
-                  </Alert>
+        <div className={classes.signinColumn}>
+          <Button className={classes.backButton} startIcon={<ArrowBackRoundedIcon />} onClick={() => navigate('/home')}>
+            返回仓库
+          </Button>
+          <Card className={classes.loginCard}>
+            <CardContent className={classes.loginCardContent}>
+              <CssBaseline />
+              <Typography align="left" className={classes.text} component="h1" variant="h4">
+                登录
+              </Typography>
+              <Typography align="left" className={classes.subtext} variant="body1" gutterBottom>
+                欢迎回来，请登录
+              </Typography>
+              {renderThirdPartyLoginMethods()}
+              {Object.keys(authMethods).length > 1 &&
+                Object.keys(authMethods).includes('openid') &&
+                Object.keys(authMethods.openid.providers).length > 0 && (
+                  <Divider className={classes.divider} data-testid="openid-divider">
+                    或
+                  </Divider>
                 )}
-                <div>
-                  <Button
+              {Object.keys(authMethods).includes('htpasswd') && (
+                <Box component="form" onSubmit={handleClick} noValidate autoComplete="on">
+                  <TextField
+                    margin="normal"
+                    required
                     fullWidth
-                    variant="contained"
-                    className={classes.continueButton}
-                    onClick={handleClick}
-                    data-testid="basic-auth-submit-btn"
-                  >
-                    Continue
-                  </Button>
-                </div>
-              </Box>
-            )}
-            {isGuestLoginEnabled && (
-              <Button
-                fullWidth
-                variant="contained"
-                className={classes.continueAsGuestButton}
-                onClick={handleGuestClick}
-              >
-                以访客身份继续
-              </Button>
-            )}
-          </CardContent>
-        </Card>
+                    id="username"
+                    label="用户名"
+                    name="username"
+                    autoComplete="username"
+                    className={classes.textField}
+                    inputProps={{ className: classes.textColor }}
+                    InputLabelProps={{ className: classes.labelColor }}
+                    onInput={(e) => handleChange(e, 'username')}
+                    error={usernameError != null}
+                    helperText={usernameError}
+                  />
+                  <TextField
+                    margin="normal"
+                    required
+                    fullWidth
+                    name="password"
+                    label="输入密码"
+                    type="password"
+                    id="password"
+                    autoComplete="current-password"
+                    className={classes.textField}
+                    inputProps={{ className: classes.textColor }}
+                    InputLabelProps={{ className: classes.labelColor }}
+                    onInput={(e) => handleChange(e, 'password')}
+                    error={passwordError != null}
+                    helperText={passwordError}
+                  />
+                  {requestError && (
+                    <Alert style={{ marginBottom: 20 }} severity="error">
+                      认证失败，请重试
+                    </Alert>
+                  )}
+                  <div>
+                    <Button
+                      type="submit"
+                      fullWidth
+                      variant="contained"
+                      className={classes.continueButton}
+                      disabled={requestProcessing}
+                      data-testid="basic-auth-submit-btn"
+                    >
+                      {requestProcessing ? <CircularProgress size={22} color="inherit" /> : '登录'}
+                    </Button>
+                  </div>
+                </Box>
+              )}
+            </CardContent>
+          </Card>
+        </div>
       )}
     </div>
   );

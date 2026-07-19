@@ -87,6 +87,12 @@ importers:
       '@babel/runtime':
         specifier: ^7.28.4
         version: 7.29.7
+      '@eslint/eslintrc':
+        specifier: 3.3.5
+        version: 3.3.5
+      '@eslint/js':
+        specifier: 9.39.4
+        version: 9.39.4
       '@playwright/test':
         specifier: ^1.46.0
         version: 1.61.1

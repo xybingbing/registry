@@ -14445,8 +14445,8 @@ func TestDynamicTLSCertificateReloading(t *testing.T) {
 	})
 }
 
-func TestDockerClientV2ChallengeWorkaround(t *testing.T) {
-	Convey("Test Docker client /v2/ challenge workaround", t, func() {
+func TestDockerClientAnonymousV2Access(t *testing.T) {
+	Convey("Test anonymous Docker client access to /v2/", t, func() {
 		port := test.GetFreePort()
 		baseURL := test.GetBaseURL(port)
 
@@ -14464,13 +14464,9 @@ func TestDockerClientV2ChallengeWorkaround(t *testing.T) {
 			}
 			conf.HTTP.AccessControl = &config.AccessControlConfig{
 				Repositories: config.Repositories{
-					"public/**": config.PolicyGroup{
+					"**": config.PolicyGroup{
 						AnonymousPolicy: []string{"read"},
-					},
-					"private/**": config.PolicyGroup{
-						Policies: []config.Policy{
-							{Actions: []string{"read", "write"}, Users: []string{htpasswdUsername}},
-						},
+						DefaultPolicy:   []string{"read", "create", "update", "delete"},
 					},
 				},
 			}
@@ -14484,68 +14480,41 @@ func TestDockerClientV2ChallengeWorkaround(t *testing.T) {
 
 			defer cm.StopServer()
 
-			// Docker client without credentials should get 401
-			resp, err := resty.R().
-				SetHeader("User-Agent", "docker/26.1.3 go/go1.22.2 UpstreamClient(Docker-Client/26.1.3 (linux))").
+			// Clients first receive a Bearer challenge, then exchange either
+			// anonymous or htpasswd credentials for a scoped token.
+			resp, err := resty.R().Get(baseURL + "/v2/")
+			So(err, ShouldBeNil)
+			So(resp.StatusCode(), ShouldEqual, http.StatusUnauthorized)
+			So(resp.Header().Get("WWW-Authenticate"), ShouldContainSubstring,
+				"Bearer realm=\""+baseURL+constants.TokenPath+"\"")
+
+			anonymousTokenResponse, err := resty.R().
+				SetQueryParam("service", "zot-registry").
+				SetQueryParam("scope", "repository:public/image:pull").
+				Get(baseURL + constants.TokenPath)
+			So(err, ShouldBeNil)
+			So(anonymousTokenResponse.StatusCode(), ShouldEqual, http.StatusOK)
+
+			var anonymousToken struct {
+				Token string `json:"token"`
+			}
+			err = json.Unmarshal(anonymousTokenResponse.Body(), &anonymousToken)
+			So(err, ShouldBeNil)
+			So(anonymousToken.Token, ShouldNotBeEmpty)
+
+			resp, err = resty.R().
+				SetAuthToken(anonymousToken.Token).
 				Get(baseURL + "/v2/")
 			So(err, ShouldBeNil)
-			So(resp, ShouldNotBeNil)
-			So(resp.StatusCode(), ShouldEqual, http.StatusUnauthorized)
-			So(resp.Header().Get("WWW-Authenticate"), ShouldContainSubstring, "Basic realm=")
+			So(resp.StatusCode(), ShouldEqual, http.StatusOK)
 
-			// Docker client with valid credentials should get 200
-			resp, err = resty.R().
-				SetHeader("User-Agent", "docker/26.1.3 go/go1.22.2 UpstreamClient(Docker-Client/26.1.3 (linux))").
+			authenticatedTokenResponse, err := resty.R().
 				SetBasicAuth(htpasswdUsername, htpasswdPassword).
-				Get(baseURL + "/v2/")
+				SetQueryParam("service", "zot-registry").
+				SetQueryParam("scope", "repository:private/image:pull,push").
+				Get(baseURL + constants.TokenPath)
 			So(err, ShouldBeNil)
-			So(resp, ShouldNotBeNil)
-			So(resp.StatusCode(), ShouldEqual, http.StatusOK)
-
-			// Docker Compose client without credentials should get 401
-			// (daemon-proxied with compose upstream client, UA starts with "docker/")
-			composeUA := "docker/29.4.0 go/go1.24.2 UpstreamClient(compose/v5.1.2)"
-			resp, err = resty.R().
-				SetHeader("User-Agent", composeUA).
-				Get(baseURL + "/v2/")
-			So(err, ShouldBeNil)
-			So(resp, ShouldNotBeNil)
-			So(resp.StatusCode(), ShouldEqual, http.StatusUnauthorized)
-			So(resp.Header().Get("WWW-Authenticate"), ShouldContainSubstring, "Basic realm=")
-
-			// Docker Compose client with valid credentials should get 200
-			resp, err = resty.R().
-				SetHeader("User-Agent", composeUA).
-				SetBasicAuth(htpasswdUsername, htpasswdPassword).
-				Get(baseURL + "/v2/")
-			So(err, ShouldBeNil)
-			So(resp, ShouldNotBeNil)
-			So(resp.StatusCode(), ShouldEqual, http.StatusOK)
-
-			// Docker Buildx client without credentials should get 401
-			// (daemon-proxied with buildx upstream client)
-			resp, err = resty.R().
-				SetHeader("User-Agent", "docker/29.4.0 go/go1.24.2 UpstreamClient(buildx/v0.21.2)").
-				Get(baseURL + "/v2/")
-			So(err, ShouldBeNil)
-			So(resp, ShouldNotBeNil)
-			So(resp.StatusCode(), ShouldEqual, http.StatusUnauthorized)
-			So(resp.Header().Get("WWW-Authenticate"), ShouldContainSubstring, "Basic realm=")
-
-			// Podman client without credentials should get 200 (unaffected by workaround)
-			resp, err = resty.R().
-				SetHeader("User-Agent", "containers/5.33.0 (github.com/containers/image)").
-				Get(baseURL + "/v2/")
-			So(err, ShouldBeNil)
-			So(resp, ShouldNotBeNil)
-			So(resp.StatusCode(), ShouldEqual, http.StatusOK)
-
-			// Generic client without credentials should get 200 (unaffected)
-			resp, err = resty.R().
-				Get(baseURL + "/v2/")
-			So(err, ShouldBeNil)
-			So(resp, ShouldNotBeNil)
-			So(resp.StatusCode(), ShouldEqual, http.StatusOK)
+			So(authenticatedTokenResponse.StatusCode(), ShouldEqual, http.StatusOK)
 		})
 
 		Convey("With only anonymous repository policies", func() {

@@ -1,0 +1,38 @@
+name: registry-example
+
+services:
+  auth-init:
+    image: httpd:2.4-alpine
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - |
+        htpasswd -Bbn "$${REGISTRY_USERNAME}" "$${REGISTRY_PASSWORD}" > /auth/htpasswd
+        chmod 600 /auth/htpasswd
+    environment:
+      REGISTRY_USERNAME: ${REGISTRY_USERNAME:-registry-admin}
+      REGISTRY_PASSWORD: ${REGISTRY_PASSWORD:-registry-test-password}
+    volumes:
+      - registry-auth:/auth
+    restart: "no"
+
+  registry:
+    image: registry-example:local
+    build:
+      context: ..
+      dockerfile: Dockerfile
+      args:
+        VERSION: compose-test
+    depends_on:
+      auth-init:
+        condition: service_completed_successfully
+    ports:
+      - "127.0.0.1:${REGISTRY_PORT:-5000}:5000"
+    volumes:
+      - registry-data:/var/lib/registry
+      - registry-auth:/etc/zot
+      - ../config.json:/etc/zot/config.json:ro
+    restart: unless-stopped
+
+volumes:
+  registry-auth:
+  registry-data:
