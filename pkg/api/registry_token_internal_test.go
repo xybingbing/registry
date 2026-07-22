@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"strings"
 	"testing"
 
 	"github.com/gorilla/mux"
@@ -71,10 +73,41 @@ func TestRegistryTokenPermissions(t *testing.T) {
 		}
 	})
 
+	t.Run("buildkit oauth form grants configured write actions", func(t *testing.T) {
+		token := requestRegistryTokenOAuth(t, tokenAuth, "writer", "secret",
+			"repository:team/image:pull,push,delete")
+
+		for _, action := range []string{"pull", "push", "delete"} {
+			if err := tokenAuth.authorizer.Authorize(t.Context(), "Bearer "+token,
+				&ResourceAction{Type: "repository", Name: "team/image", Action: action}); err != nil {
+				t.Fatalf("BuildKit OAuth %s token was rejected: %v", action, err)
+			}
+		}
+	})
+
 	t.Run("invalid credentials are rejected", func(t *testing.T) {
 		request := httptest.NewRequest(http.MethodGet,
 			"http://registry.test/zot/auth/token?scope=repository:team/image:push", nil)
 		request.SetBasicAuth("writer", "wrong")
+		response := httptest.NewRecorder()
+
+		tokenAuth.TokenHandler()(response, request)
+
+		if response.Code != http.StatusUnauthorized {
+			t.Fatalf("expected status %d, got %d", http.StatusUnauthorized, response.Code)
+		}
+	})
+
+	t.Run("invalid buildkit oauth credentials are rejected", func(t *testing.T) {
+		form := url.Values{
+			"grant_type": {"password"},
+			"username":   {"writer"},
+			"password":   {"wrong"},
+			"scope":      {"repository:team/image:pull,push"},
+		}
+		request := httptest.NewRequest(http.MethodPost, "http://registry.test/zot/auth/token",
+			strings.NewReader(form.Encode()))
+		request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 		response := httptest.NewRecorder()
 
 		tokenAuth.TokenHandler()(response, request)
@@ -172,6 +205,38 @@ func requestRegistryToken(t *testing.T, tokenAuth *registryTokenAuth, username, 
 	}
 
 	response := httptest.NewRecorder()
+	tokenAuth.TokenHandler()(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("expected token status %d, got %d: %s", http.StatusOK, response.Code, response.Body.String())
+	}
+
+	var tokenResponse registryTokenResponse
+	if err := json.Unmarshal(response.Body.Bytes(), &tokenResponse); err != nil {
+		t.Fatal(err)
+	}
+	if tokenResponse.Token == "" {
+		t.Fatal("token response is empty")
+	}
+
+	return tokenResponse.Token
+}
+
+func requestRegistryTokenOAuth(t *testing.T, tokenAuth *registryTokenAuth, username, password, scope string) string {
+	t.Helper()
+
+	form := url.Values{
+		"grant_type": {"password"},
+		"service":    {registryTokenService},
+		"scope":      {scope},
+		"client_id":  {"buildkit"},
+		"username":   {username},
+		"password":   {password},
+	}
+	request := httptest.NewRequest(http.MethodPost, "http://registry.test/zot/auth/token",
+		strings.NewReader(form.Encode()))
+	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	response := httptest.NewRecorder()
+
 	tokenAuth.TokenHandler()(response, request)
 	if response.Code != http.StatusOK {
 		t.Fatalf("expected token status %d, got %d: %s", http.StatusOK, response.Code, response.Body.String())

@@ -97,12 +97,37 @@ func (auth *registryTokenAuth) TokenHandler() http.HandlerFunc {
 			return
 		}
 
+		if request.Method == http.MethodPost {
+			request.Body = http.MaxBytesReader(response, request.Body, int64(constants.MaxTokenRequestBodySize))
+		}
+
+		if err := request.ParseForm(); err != nil {
+			zcommon.WriteJSON(response, http.StatusBadRequest, apiErr.NewError(apiErr.UNSUPPORTED))
+
+			return
+		}
+
 		username := ""
 		if !isAuthorizationHeaderEmpty(request) {
 			var password string
 			var ok bool
 			username, password, ok = request.BasicAuth()
 			if !ok {
+				auth.rejectTokenCredentials(response, request)
+
+				return
+			}
+
+			authenticated, _ := auth.controller.HTPasswd.Authenticate(username, password)
+			if !authenticated {
+				auth.rejectTokenCredentials(response, request)
+
+				return
+			}
+		} else if request.Method == http.MethodPost && hasRegistryTokenFormCredentials(request) {
+			username = request.PostForm.Get("username")
+			password := request.PostForm.Get("password")
+			if username == "" || password == "" {
 				auth.rejectTokenCredentials(response, request)
 
 				return
@@ -157,7 +182,7 @@ func (auth *registryTokenAuth) authorizedAccess(request *http.Request, username 
 
 	granted := make([]ResourceAccess, 0)
 
-	for _, rawScope := range request.URL.Query()["scope"] {
+	for _, rawScope := range request.Form["scope"] {
 		for _, scope := range strings.Fields(rawScope) {
 			parts := strings.SplitN(scope, ":", 3)
 			if len(parts) != 3 || parts[0] != "repository" || parts[1] == "" {
@@ -180,6 +205,11 @@ func (auth *registryTokenAuth) authorizedAccess(request *http.Request, username 
 	}
 
 	return granted
+}
+
+func hasRegistryTokenFormCredentials(request *http.Request) bool {
+	return request.PostForm.Get("grant_type") == "password" ||
+		request.PostForm.Get("username") != "" || request.PostForm.Get("password") != ""
 }
 
 func (auth *registryTokenAuth) canGrant(accessController *AccessController, request *http.Request,
