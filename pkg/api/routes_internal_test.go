@@ -76,7 +76,8 @@ func newSyncEnabledController(syncOnDemand SyncOnDemand) *Controller {
 func TestGetImageManifestRefreshesSinglePlatformTag(t *testing.T) {
 	t.Parallel()
 
-	oldContent := []byte(`{"mediaType":"application/vnd.oci.image.manifest.v1+json"}`)
+	oldContent := []byte(`{"mediaType":"application/vnd.oci.image.manifest.v1+json",` +
+		`"config":{"mediaType":"application/vnd.oci.image.config.v1+json"}}`)
 	newContent := []byte(`{"mediaType":"application/vnd.oci.image.index.v1+json"}`)
 	oldDigest := godigest.FromBytes(oldContent)
 	newDigest := godigest.FromBytes(newContent)
@@ -162,7 +163,8 @@ func TestGetImageManifestServesLocalImageWhenUpstreamDoesNotExist(t *testing.T) 
 func TestGetImageManifestReturnsSinglePlatformSyncFailure(t *testing.T) {
 	t.Parallel()
 
-	localContent := []byte(`{"mediaType":"application/vnd.oci.image.manifest.v1+json"}`)
+	localContent := []byte(`{"mediaType":"application/vnd.oci.image.manifest.v1+json",` +
+		`"config":{"mediaType":"application/vnd.oci.image.config.v1+json"}}`)
 	localDigest := godigest.FromBytes(localContent)
 	syncErr := errors.New("upstream unavailable")
 	imgStore := &mocks.MockedImageStore{
@@ -181,6 +183,40 @@ func TestGetImageManifestReturnsSinglePlatformSyncFailure(t *testing.T) {
 		"redis", "8-alpine", "")
 	if !errors.Is(err, syncErr) {
 		t.Fatalf("expected sync failure %v, got %v", syncErr, err)
+	}
+}
+
+func TestGetImageManifestServesLocalOCIArtifactWithoutSync(t *testing.T) {
+	t.Parallel()
+
+	localContent := []byte(`{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json",` +
+		`"config":{"mediaType":"application/vnd.cncf.helm.config.v1+json"}}`)
+	localDigest := godigest.FromBytes(localContent)
+	syncCalls := 0
+	imgStore := &mocks.MockedImageStore{
+		GetImageManifestFn: func(repo, reference string) ([]byte, godigest.Digest, string, error) {
+			return localContent, localDigest, ispec.MediaTypeImageManifest, nil
+		},
+	}
+	syncStub := &syncOnDemandStub{
+		syncImageForHostPrefixForced: func(_ context.Context, hostPrefix, repo, reference string) error {
+			syncCalls++
+
+			return errors.New("OCI artifact must not trigger image synchronization")
+		},
+	}
+	routeHandler := &RouteHandler{c: newSyncEnabledController(syncStub)}
+
+	content, digest, mediaType, err := getImageManifest(context.Background(), routeHandler, imgStore,
+		"helm/gitea-drone", "0.1.0", "")
+	if err != nil {
+		t.Fatalf("getImageManifest() error = %v", err)
+	}
+	if string(content) != string(localContent) || digest != localDigest || mediaType != ispec.MediaTypeImageManifest {
+		t.Fatalf("expected local Helm manifest, got digest=%q mediaType=%q content=%s", digest, mediaType, content)
+	}
+	if syncCalls != 0 {
+		t.Fatalf("expected no sync for OCI artifact, got %d calls", syncCalls)
 	}
 }
 

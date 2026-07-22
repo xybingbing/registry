@@ -2802,7 +2802,7 @@ func getImageManifest(ctx context.Context, routeHandler *RouteHandler, imgStore 
 				content, digest, mediaType)
 		}
 
-		if !isImageManifestMediaType(mediaType) {
+		if !isImageManifestMediaType(mediaType) || !isContainerImageManifest(content) {
 			return content, digest, mediaType, nil
 		}
 
@@ -2846,6 +2846,16 @@ func isTagReference(reference string) bool {
 
 func isImageManifestMediaType(mediaType string) bool {
 	return mediaType == ispec.MediaTypeImageManifest || compat.IsCompatibleManifestMediaType(mediaType)
+}
+
+func isContainerImageManifest(content []byte) bool {
+	var manifest ispec.Manifest
+	if err := json.Unmarshal(content, &manifest); err != nil {
+		return false
+	}
+
+	return manifest.Config.MediaType == ispec.MediaTypeImageConfig ||
+		compat.IsCompatibleConfigMediaType(manifest.Config.MediaType)
 }
 
 func isImageIndexMediaType(mediaType string) bool {
