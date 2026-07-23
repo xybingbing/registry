@@ -2810,7 +2810,7 @@ func getImageManifest(ctx context.Context, routeHandler *RouteHandler, imgStore 
 			Msg("local tag is a single-platform image, trying to sync a multi-platform image on demand")
 
 		if errSync := routeHandler.c.SyncOnDemand.SyncImageForHostPrefixForced(ctx, hostPrefix, name, reference); errSync != nil {
-			if isUpstreamImageNotFound(errSync) {
+			if shouldServeLocalImageOnSyncError(errSync) {
 				return content, digest, mediaType, nil
 			}
 
@@ -2862,8 +2862,9 @@ func isImageIndexMediaType(mediaType string) bool {
 	return mediaType == ispec.MediaTypeImageIndex || compat.IsCompatibleManifestListMediaType(mediaType)
 }
 
-func isUpstreamImageNotFound(err error) bool {
-	return errors.Is(err, zerr.ErrManifestNotFound) || errors.Is(err, zerr.ErrRepoNotFound)
+func shouldServeLocalImageOnSyncError(err error) bool {
+	return errors.Is(err, zerr.ErrManifestNotFound) || errors.Is(err, zerr.ErrRepoNotFound) ||
+		errors.Is(err, zerr.ErrUnauthorizedAccess)
 }
 
 func getRefreshedImageManifest(routeHandler *RouteHandler, imgStore storageTypes.ImageStore, name, reference string,

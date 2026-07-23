@@ -135,10 +135,6 @@ func (registry *RemoteRegistry) headManifest(ctx context.Context, imageReference
 		/* public registries may return 401 for image not found
 		they will try to check private registries as a fallback => 401 */
 		if errors.Is(err, errs.ErrHTTPUnauthorized) {
-			registry.log.Info().Str("errorType", common.TypeOf(err)).
-				Str("repository", imageReference.Repository).Str("reference", imageReference.Reference).
-				Err(err).Msg("failed to get manifest: unauthorized")
-
 			return nil, zerr.ErrUnauthorizedAccess
 		} else if errors.Is(err, errs.ErrNotFound) {
 			registry.log.Info().Str("errorType", common.TypeOf(err)).
@@ -162,10 +158,6 @@ func (registry *RemoteRegistry) getManifest(ctx context.Context, imageReference 
 		/* public registries may return 401 for image not found
 		they will try to check private registries as a fallback => 401 */
 		if errors.Is(err, errs.ErrHTTPUnauthorized) {
-			registry.log.Info().Str("errorType", common.TypeOf(err)).
-				Str("repository", imageReference.Repository).Str("reference", imageReference.Reference).
-				Err(err).Msg("failed to get manifest: unauthorized")
-
 			return nil, zerr.ErrUnauthorizedAccess
 		} else if errors.Is(err, errs.ErrNotFound) {
 			registry.log.Info().Str("errorType", common.TypeOf(err)).

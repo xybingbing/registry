@@ -552,16 +552,20 @@ func (service *BaseService) computeLocalStoredImageDigest(ctx context.Context, r
 	if !service.config.PreserveDigest {
 		localDigest, remoteDigest, isConverted, err = service.remote.GetOCIDigest(ctx, repo, tag)
 		if err != nil {
-			service.log.Error().Err(err).Str("repository", repo).Str("reference", tag).
-				Msg("failed to get upstream image manifest details")
+			if !errors.Is(err, zerr.ErrUnauthorizedAccess) {
+				service.log.Error().Err(err).Str("repository", repo).Str("reference", tag).
+					Msg("failed to get upstream image manifest details")
+			}
 
 			return "", "", false, err
 		}
 	} else {
 		remoteDigest, err = service.remote.GetDigest(ctx, repo, tag)
 		if err != nil {
-			service.log.Error().Err(err).Str("repository", repo).Str("reference", tag).
-				Msg("failed to get upstream image manifest details")
+			if !errors.Is(err, zerr.ErrUnauthorizedAccess) {
+				service.log.Error().Err(err).Str("repository", repo).Str("reference", tag).
+					Msg("failed to get upstream image manifest details")
+			}
 
 			return "", "", false, err
 		}

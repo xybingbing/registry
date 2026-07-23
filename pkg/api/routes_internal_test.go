@@ -122,41 +122,53 @@ func TestGetImageManifestRefreshesSinglePlatformTag(t *testing.T) {
 	}
 }
 
-func TestGetImageManifestServesLocalImageWhenUpstreamDoesNotExist(t *testing.T) {
+func TestGetImageManifestServesLocalImageWhenUpstreamIsUnavailable(t *testing.T) {
 	t.Parallel()
 
-	localContent := []byte(`{"mediaType":"application/vnd.docker.distribution.manifest.v2+json"}`)
-	localDigest := godigest.FromBytes(localContent)
-	getCalls := 0
-
-	imgStore := &mocks.MockedImageStore{
-		GetImageManifestFn: func(repo, reference string) ([]byte, godigest.Digest, string, error) {
-			getCalls++
-
-			return localContent, localDigest, "application/vnd.docker.distribution.manifest.v2+json", nil
-		},
+	tests := []struct {
+		name    string
+		syncErr error
+	}{
+		{name: "manifest not found", syncErr: zerr.ErrManifestNotFound},
+		{name: "repository not found", syncErr: zerr.ErrRepoNotFound},
+		{name: "upstream unauthorized", syncErr: zerr.ErrUnauthorizedAccess},
 	}
 
-	syncStub := &syncOnDemandStub{
-		syncImageForHostPrefixForced: func(_ context.Context, hostPrefix, repo, reference string) error {
-			return zerr.ErrManifestNotFound
-		},
-	}
-	routeHandler := &RouteHandler{c: newSyncEnabledController(syncStub)}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
 
-	content, digest, mediaType, err := getImageManifest(context.Background(), routeHandler, imgStore,
-		"redis", "8-alpine", "")
-	if err != nil {
-		t.Fatalf("getImageManifest() error = %v", err)
-	}
+			localContent := []byte(`{"mediaType":"application/vnd.docker.distribution.manifest.v2+json"}`)
+			localDigest := godigest.FromBytes(localContent)
+			getCalls := 0
+			imgStore := &mocks.MockedImageStore{
+				GetImageManifestFn: func(repo, reference string) ([]byte, godigest.Digest, string, error) {
+					getCalls++
 
-	if string(content) != string(localContent) || digest != localDigest ||
-		mediaType != "application/vnd.docker.distribution.manifest.v2+json" {
-		t.Fatalf("expected local manifest fallback, got digest=%q mediaType=%q content=%s", digest, mediaType, content)
-	}
+					return localContent, localDigest, "application/vnd.docker.distribution.manifest.v2+json", nil
+				},
+			}
+			syncStub := &syncOnDemandStub{
+				syncImageForHostPrefixForced: func(_ context.Context, hostPrefix, repo, reference string) error {
+					return test.syncErr
+				},
+			}
+			routeHandler := &RouteHandler{c: newSyncEnabledController(syncStub)}
 
-	if getCalls != 1 {
-		t.Fatalf("expected one local read when upstream is missing, got %d", getCalls)
+			content, digest, mediaType, err := getImageManifest(context.Background(), routeHandler, imgStore,
+				"redis", "8-alpine", "")
+			if err != nil {
+				t.Fatalf("getImageManifest() error = %v", err)
+			}
+			if string(content) != string(localContent) || digest != localDigest ||
+				mediaType != "application/vnd.docker.distribution.manifest.v2+json" {
+				t.Fatalf("expected local manifest fallback, got digest=%q mediaType=%q content=%s",
+					digest, mediaType, content)
+			}
+			if getCalls != 1 {
+				t.Fatalf("expected one local read when upstream is unavailable, got %d", getCalls)
+			}
+		})
 	}
 }
 
